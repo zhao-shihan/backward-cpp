@@ -4280,6 +4280,8 @@ public:
     error_addr = reinterpret_cast<void *>(uctx->uc_mcontext->__ss.__rip);
 #elif defined(__APPLE__)
     error_addr = reinterpret_cast<void *>(uctx->uc_mcontext->__ss.__eip);
+#elif defined(__loongarch__)
+    error_addr = reinterpret_cast<void *>(uctx->uc_mcontext.__pc);
 #else
 #warning ":/ sorry, ain't know no nothing none not of your architecture!"
 #endif
