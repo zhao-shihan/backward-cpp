@@ -36,6 +36,7 @@ include(BackwardConfig.cmake)
 ###############################################################################
 
 option(BACKWARD_SHARED "Build backward as a shared library" OFF)
+option(BACKWARD_INSTALL "Install backward." ON)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND NOT DEFINED BACKWARD_TESTS)
 	# If this is a top level CMake project, we most lixely want the tests
 	set(BACKWARD_TESTS ON CACHE BOOL "Enable tests")
@@ -168,16 +169,20 @@ if(BACKWARD_TESTS)
 	endforeach()
 endif()
 
-install(
-    FILES "backward.hpp"
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
-install(
-    FILES "BackwardConfig.cmake"
-    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}"
-)
-# check if Backward is being used as a top-level project or included as a subproject
-if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+# The install rules must not depend on whether Backward is the top-level
+# project. When Backward is a subproject, the parent project may reference
+# Backward::Interface from its own install(EXPORT); that requires the targets to
+# be in an export set. Installing BackwardConfig.cmake without the matching
+# BackwardTargets.cmake would also leave a broken package behind.
+if(BACKWARD_INSTALL)
+    install(
+        FILES "backward.hpp"
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    )
+    install(
+        FILES "BackwardConfig.cmake"
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}"
+    )
     # export the targets (note that exporting backward_object does not make sense)
     install(TARGETS backward_interface backward EXPORT BackwardTargets)
     # install a CMake file for the exported targets
