@@ -231,6 +231,7 @@ endif()
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(Backward
 	REQUIRED_VARS ${FIND_PACKAGE_REQUIRED_VARS}
+	VERSION_VAR Backward_VERSION
 )
 list(APPEND _BACKWARD_INCLUDE_DIRS ${BACKWARD_INCLUDE_DIR})
 

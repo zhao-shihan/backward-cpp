@@ -21,7 +21,7 @@
 # SOFTWARE.
 
 cmake_minimum_required(VERSION 3.14)
-project(backward CXX)
+project(backward VERSION 1.6.1 LANGUAGES CXX)
 
 # Introduce variables:
 # * CMAKE_INSTALL_LIBDIR
@@ -29,6 +29,17 @@ project(backward CXX)
 # * CMAKE_INSTALL_INCLUDEDIR
 include(GNUInstallDirs)
 
+include(CMakePackageConfigHelpers)
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/BackwardConfigVersion.cmake"
+    VERSION "${PROJECT_VERSION}"
+    COMPATIBILITY SameMajorVersion
+)
+
+# BackwardConfig.cmake does not hardcode a version: when installed,
+# find_package() exposes Backward_VERSION from BackwardConfigVersion.cmake.
+# The in-tree include below needs the same variable.
+set(Backward_VERSION ${PROJECT_VERSION})
 include(BackwardConfig.cmake)
 
 ###############################################################################
@@ -123,7 +134,10 @@ if(BACKWARD_SHARED)
     set(libtype SHARED)
 endif()
 add_library(backward ${libtype} backward.cpp)
-set_target_properties(backward PROPERTIES EXPORT_NAME Backward)
+set_target_properties(backward PROPERTIES
+    EXPORT_NAME Backward
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR})
 target_link_libraries(backward PUBLIC Backward::Interface)
 add_library(Backward::Backward ALIAS backward)
 
@@ -180,7 +194,9 @@ if(BACKWARD_INSTALL)
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     )
     install(
-        FILES "BackwardConfig.cmake"
+        FILES
+            "BackwardConfig.cmake"
+            "${CMAKE_CURRENT_BINARY_DIR}/BackwardConfigVersion.cmake"
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}"
     )
     # export the targets (note that exporting backward_object does not make sense)

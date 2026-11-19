@@ -1,12 +1,12 @@
 from conans import ConanFile, CMake
 import os
+import re
 
 class BackwardCpp(ConanFile):
     settings = 'os', 'compiler', 'build_type', 'arch'
     name = 'backward'
     url = 'https://github.com/bombela/backward-cpp'
     license = 'MIT'
-    version = '1.3.0'
     options = {
         'stack_walking_unwind': [True, False],
         'stack_walking_backtrace': [True, False],
@@ -27,6 +27,19 @@ class BackwardCpp(ConanFile):
     )
     exports = 'backward.cpp', 'backward.hpp', 'test/*', 'CMakeLists.txt', 'BackwardConfig.cmake'
     generators = 'cmake'
+
+    def set_version(self):
+        # Keep the version in one place: the CMake project declaration.
+        cmake_lists = os.path.join(self.recipe_folder, 'CMakeLists.txt')
+        with open(cmake_lists, encoding='utf-8') as handle:
+            match = re.search(
+                r'^\s*project\s*\(\s*backward\s+VERSION\s+([0-9]+(?:\.[0-9]+)*)',
+                handle.read(),
+                re.MULTILINE,
+            )
+        if match is None:
+            raise ValueError('Could not read the version from CMakeLists.txt')
+        self.version = match.group(1)
 
     def build(self):
         cmake = CMake(self)
