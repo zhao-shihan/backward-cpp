@@ -35,12 +35,11 @@ write_basic_package_version_file(
     VERSION "${PROJECT_VERSION}"
     COMPATIBILITY SameMajorVersion
 )
-
-# BackwardConfig.cmake does not hardcode a version: when installed,
-# find_package() exposes Backward_VERSION from BackwardConfigVersion.cmake.
-# The in-tree include below needs the same variable.
-set(Backward_VERSION ${PROJECT_VERSION})
-include(BackwardConfig.cmake)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/BackwardConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/BackwardConfig.cmake"
+    @ONLY
+)
 
 ###############################################################################
 # OPTIONS
@@ -100,6 +99,16 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_COMPILER_IS_GNUCXX)
 endif()
 
 ###############################################################################
+# DEPENDENCIES
+###############################################################################
+
+# Resolve the stack unwinder and symbolizer. This runs after the compiler flags
+# so that the compile/link probes see the same flags as the real build. See
+# cmake/BackwardDependencies.cmake for the semantics of BACKWARD_UNWINDER and
+# BACKWARD_SYMBOLIZER.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/BackwardDependencies.cmake")
+
+###############################################################################
 # BACKWARD INTERFACE
 ###############################################################################
 
@@ -107,9 +116,7 @@ add_library(backward_interface INTERFACE)
 set_target_properties(backward_interface PROPERTIES EXPORT_NAME Interface)
 target_compile_definitions(backward_interface INTERFACE ${BACKWARD_DEFINITIONS})
 target_include_directories(backward_interface INTERFACE ${BACKWARD_INCLUDE_DIRS})
-if(BACKWARD_HAS_EXTERNAL_LIBRARIES)
-    target_link_libraries(backward_interface INTERFACE ${BACKWARD_LIBRARIES})
-endif()
+target_link_libraries(backward_interface INTERFACE ${BACKWARD_LIBRARIES})
 add_library(Backward::Interface ALIAS backward_interface)
 
 ###############################################################################
@@ -181,6 +188,25 @@ if(BACKWARD_TESTS)
 	foreach(test ${TESTS})
 		backward_add_test(test/${test}.cpp backward.cpp)
 	endforeach()
+
+	# Dependency selection matrix. Every case configures a fresh consumer
+	# project, so the discovery and compile/link probes run exactly like they do
+	# for a real user, with a different BACKWARD_UNWINDER/BACKWARD_SYMBOLIZER.
+	add_test(NAME backends
+		COMMAND ${CMAKE_COMMAND}
+			"-DBACKWARD_SOURCE_DIR=${PROJECT_SOURCE_DIR}"
+			"-DBACKWARD_TEST_SOURCE_DIR=${PROJECT_SOURCE_DIR}/test/backends/project"
+			"-DBACKWARD_TEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/backends"
+			"-DBACKWARD_GENERATOR=${CMAKE_GENERATOR}"
+			"-DBACKWARD_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+			"-DBACKWARD_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
+			"-DBACKWARD_BUILD_CONFIG=$<CONFIG>"
+			"-DBACKWARD_MULTI_CONFIG=$<BOOL:${CMAKE_CONFIGURATION_TYPES}>"
+			"-DBACKWARD_EXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+			"-DBACKWARD_PLATFORM=${_BACKWARD_PLATFORM}"
+			"-DBACKWARD_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
+			"-DBACKWARD_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+			-P "${PROJECT_SOURCE_DIR}/test/backends/run_tests.cmake")
 endif()
 
 # The install rules must not depend on whether Backward is the top-level
@@ -195,7 +221,7 @@ if(BACKWARD_INSTALL)
     )
     install(
         FILES
-            "BackwardConfig.cmake"
+            "${CMAKE_CURRENT_BINARY_DIR}/BackwardConfig.cmake"
             "${CMAKE_CURRENT_BINARY_DIR}/BackwardConfigVersion.cmake"
         DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}"
     )

@@ -1,0 +1,11 @@
+# BackwardConfig.cmake for an installed Backward package.
+#
+# The backends were selected when Backward was built. The exported targets carry
+# the matching compile definitions, include directories, and link libraries, so
+# this file only needs to expose them.
+#
+# Use Backward::Interface for the header-only library, Backward::Backward for
+# the compiled library, and Backward::Object when building backward.cpp
+# yourself (the object target is only available in the build tree).
+
+include("${CMAKE_CURRENT_LIST_DIR}/BackwardTargets.cmake")

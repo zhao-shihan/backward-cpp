@@ -1,37 +1,25 @@
-// Pick your poison.
+// Backward can use optional external libraries for two independent jobs:
 //
-// On GNU/Linux, you have few choices to get the most out of your stack trace.
+//   * walking the stack                  BACKWARD_WALKER_*
+//   * resolving symbols and debug info   BACKWARD_SYMBOLIZER_*
 //
-// By default you get:
-//	- object filename
-//	- function name
+// When Backward is built with CMake, both are selected automatically (see the
+// BACKWARD_UNWINDER and BACKWARD_SYMBOLIZER options, and the README). The
+// exported CMake targets carry the matching compile definitions and link
+// libraries, so this file needs no #define at all in that case.
 //
-// In order to add:
-//	- source filename
-//	- line and column numbers
-//	- source code snippet (assuming the file is accessible)
-
-// Install one of the following libraries then uncomment one of the macro (or
-// better, add the detection of the lib and the macro definition in your build
-// system)
-
-// - apt-get install libdw-dev ...
-// - g++/clang++ -ldw ...
-// #define BACKWARD_HAS_DW 1
-
-// - apt-get install binutils-dev ...
-// - g++/clang++ -lbfd ...
-// #define BACKWARD_HAS_BFD 1
-
-// - apt-get install libdwarf-dev ...
-// - g++/clang++ -ldwarf ...
-// #define BACKWARD_HAS_DWARF 1
-
-// Regardless of the library you choose to read the debug information,
-// for potentially more detailed stack traces you can use libunwind
-// - apt-get install libunwind-dev
-// - g++/clang++ -lunwind
-// #define BACKWARD_HAS_LIBUNWIND 1
+// Without CMake, define exactly one BACKWARD_WALKER_* macro and one
+// BACKWARD_SYMBOLIZER_* macro here (or in your build system), and link the
+// corresponding library. For example, on GNU/Linux:
+//
+//   apt-get install libdw-dev libunwind-dev
+//   g++/clang++ -ldw -lunwind ...
+//   #define BACKWARD_WALKER_LIBUNWIND
+//   #define BACKWARD_SYMBOLIZER_DW
+//
+// Without any definition, backward uses the portable defaults that need no
+// third-party link flags: the compiler's unwinder plus backtrace_symbols, or
+// dbghelp/PDB on Windows.
 
 #include "backward.hpp"
 

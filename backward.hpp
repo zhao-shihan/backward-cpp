@@ -93,140 +93,159 @@
 #include <string>
 #include <vector>
 
+// ---------------------------------------------------------------------------
+// Optional external dependencies
+// ---------------------------------------------------------------------------
+//
+// A stack trace needs two independent things, and backward supports several
+// libraries for each of them:
+//
+//   * walking the stack                  BACKWARD_WALKER_*
+//   * resolving symbols and debug info   BACKWARD_SYMBOLIZER_*
+//
+// The build system (see cmake/BackwardDependencies.cmake) finds the libraries
+// that are actually usable, selects the most capable one, or the one requested
+// by the user, and defines exactly one presence macro per category. Only the
+// selected library is included and linked.
+//
+// Without a build system, backward uses the backends that need no third-party
+// link flags:
+//
+//   Linux / macOS   BACKWARD_WALKER_UNWIND
+//                   BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL
+//   Windows         BACKWARD_WALKER_DBGHELP
+//                   BACKWARD_SYMBOLIZER_PDB
+//
+// Defining a backend that needs an external library without linking that
+// library will fail at link time. Prefer the CMake targets when possible.
+//
+// Stack walkers:
+//
+//   BACKWARD_WALKER_UNWIND
+//     The compiler's _Unwind_* API (libgcc or compiler-rt). It is the API the
+//     C++ runtime itself uses to unwind exceptions and is usually already
+//     linked into the program.
+//
+//   BACKWARD_WALKER_LIBUNWIND
+//     libunwind. In some cases more accurate than the compiler's unwinder: it
+//     knows how to decode signal handler frames and lets backward edit the
+//     context registers, which allows walking over bad function references.
+//
+//   BACKWARD_WALKER_BACKTRACE
+//     backtrace(3) from the C library. Portable, but it hides the instruction
+//     pointer adjustment information backward needs for perfect accuracy.
+//
+//   BACKWARD_WALKER_DBGHELP
+//     dbghelp (Windows only).
+//
+//   BACKWARD_WALKER_NONE
+//     Capture no stack trace at all.
+//
+// Symbolizers on Linux:
+//
+//   BACKWARD_SYMBOLIZER_DW
+//     libdw / elfutils. Richest output, and usually the fastest.
+//   BACKWARD_SYMBOLIZER_BFD
+//     libbfd from GNU binutils. Rich output. Note that libbfd is GPL.
+//   BACKWARD_SYMBOLIZER_DWARF
+//     libdwarf + libelf. Rich output, including DWARF5 .debug_rnglists. This
+//     backend uses the modern libdwarf consumer API (0.1.0 / 2021 and later);
+//     the legacy API of older libdwarf releases is not supported.
+//   BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL
+//     backtrace_symbols(3). Minimal output: object and function names.
+//
+// On macOS the only symbolizer is BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL, and on
+// Windows it is BACKWARD_SYMBOLIZER_PDB. BACKWARD_SYMBOLIZER_NONE is available
+// everywhere and keeps raw addresses only.
+//
+// Only one backend of each category may be selected.
+//
+
+#if (defined(BACKWARD_WALKER_UNWIND) + defined(BACKWARD_WALKER_LIBUNWIND) +     \
+     defined(BACKWARD_WALKER_BACKTRACE) + defined(BACKWARD_WALKER_DBGHELP) +    \
+     defined(BACKWARD_WALKER_NONE)) > 1
+#error "Backward: select at most one BACKWARD_WALKER_* backend"
+#endif
+
+#if (defined(BACKWARD_SYMBOLIZER_DW) + defined(BACKWARD_SYMBOLIZER_BFD) +       \
+     defined(BACKWARD_SYMBOLIZER_DWARF) +                                       \
+     defined(BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL) +                            \
+     defined(BACKWARD_SYMBOLIZER_PDB) + defined(BACKWARD_SYMBOLIZER_NONE)) > 1
+#error "Backward: select at most one BACKWARD_SYMBOLIZER_* backend"
+#endif
+
+#if (defined(BACKWARD_SYSTEM_LINUX) || defined(BACKWARD_SYSTEM_DARWIN)) &&      \
+    defined(BACKWARD_WALKER_DBGHELP)
+#error "Backward: BACKWARD_WALKER_DBGHELP is only available on Windows"
+#endif
+
+#if defined(BACKWARD_SYSTEM_WINDOWS) &&                                        \
+    (defined(BACKWARD_WALKER_UNWIND) || defined(BACKWARD_WALKER_LIBUNWIND) ||   \
+     defined(BACKWARD_WALKER_BACKTRACE))
+#error "Backward: this stack walker is not available on Windows"
+#endif
+
+#if defined(BACKWARD_SYSTEM_LINUX) && defined(BACKWARD_SYMBOLIZER_PDB)
+#error "Backward: BACKWARD_SYMBOLIZER_PDB is only available on Windows"
+#endif
+
+#if defined(BACKWARD_SYSTEM_DARWIN) &&                                         \
+    (defined(BACKWARD_SYMBOLIZER_DW) || defined(BACKWARD_SYMBOLIZER_BFD) ||     \
+     defined(BACKWARD_SYMBOLIZER_DWARF) || defined(BACKWARD_SYMBOLIZER_PDB))
+#error "Backward: this symbolizer is not available on macOS"
+#endif
+
+#if defined(BACKWARD_SYSTEM_WINDOWS) &&                                        \
+    (defined(BACKWARD_SYMBOLIZER_DW) || defined(BACKWARD_SYMBOLIZER_BFD) ||     \
+     defined(BACKWARD_SYMBOLIZER_DWARF) ||                                     \
+     defined(BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL))
+#error "Backward: this symbolizer is not available on Windows"
+#endif
+
+// Platform defaults. They are used only when the build system (or the user)
+// did not select anything for the category.
+
+#if defined(BACKWARD_SYSTEM_LINUX) || defined(BACKWARD_SYSTEM_DARWIN)
+#if !defined(BACKWARD_WALKER_UNWIND) && !defined(BACKWARD_WALKER_LIBUNWIND) && \
+    !defined(BACKWARD_WALKER_BACKTRACE) && !defined(BACKWARD_WALKER_NONE)
+#define BACKWARD_WALKER_UNWIND
+#endif
+#endif
+
+#if defined(BACKWARD_SYSTEM_WINDOWS)
+#if !defined(BACKWARD_WALKER_DBGHELP) && !defined(BACKWARD_WALKER_NONE)
+#define BACKWARD_WALKER_DBGHELP
+#endif
+#endif
+
 #if defined(BACKWARD_SYSTEM_LINUX)
-
-// On linux, backtrace can back-trace or "walk" the stack using the following
-// libraries:
-//
-// #define BACKWARD_HAS_UNWIND 1
-//  - unwind comes from libgcc, but I saw an equivalent inside clang itself.
-//  - with unwind, the stacktrace is as accurate as it can possibly be, since
-//  this is used by the C++ runtime in gcc/clang for stack unwinding on
-//  exception.
-//  - normally libgcc is already linked to your program by default.
-//
-// #define BACKWARD_HAS_LIBUNWIND 1
-//  - libunwind provides, in some cases, a more accurate stacktrace as it knows
-//  to decode signal handler frames and lets us edit the context registers when
-//  unwinding, allowing stack traces over bad function references.
-//
-// #define BACKWARD_HAS_BACKTRACE == 1
-//  - backtrace seems to be a little bit more portable than libunwind, but on
-//  linux, it uses unwind anyway, but abstract away a tiny information that is
-//  sadly really important in order to get perfectly accurate stack traces.
-//  - backtrace is part of the (e)glib library.
-//
-// The default is:
-// #define BACKWARD_HAS_UNWIND == 1
-//
-// Note that only one of the define should be set to 1 at a time.
-//
-#ifndef BACKWARD_HAS_UNWIND
-#define BACKWARD_HAS_UNWIND 0
+#if !defined(BACKWARD_SYMBOLIZER_DW) && !defined(BACKWARD_SYMBOLIZER_BFD) &&    \
+    !defined(BACKWARD_SYMBOLIZER_DWARF) &&                                     \
+    !defined(BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL) &&                          \
+    !defined(BACKWARD_SYMBOLIZER_NONE)
+#define BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL
+#endif
+#elif defined(BACKWARD_SYSTEM_DARWIN)
+#if !defined(BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL) &&                          \
+    !defined(BACKWARD_SYMBOLIZER_NONE)
+#define BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL
+#endif
+#elif defined(BACKWARD_SYSTEM_WINDOWS)
+#if !defined(BACKWARD_SYMBOLIZER_PDB) && !defined(BACKWARD_SYMBOLIZER_NONE)
+#define BACKWARD_SYMBOLIZER_PDB
+#endif
 #endif
 
-#ifndef BACKWARD_HAS_LIBUNWIND
-#define BACKWARD_HAS_LIBUNWIND 0
+#if defined(BACKWARD_WALKER_LIBUNWIND)
+// Defined to 1 by the build system when libunwind provides unw_init_local2()
+// and UNW_INIT_SIGNAL_FRAME. Without it, unw_init_local() is used and libunwind
+// may not be able to start unwinding from a signal handler frame.
+#ifndef BACKWARD_LIBUNWIND_HAS_SIGNAL_FRAME
+#define BACKWARD_LIBUNWIND_HAS_SIGNAL_FRAME 0
+#endif
 #endif
 
-#ifndef BACKWARD_HAS_BACKTRACE
-#define BACKWARD_HAS_BACKTRACE 0
-#endif
-
-#if BACKWARD_HAS_UNWIND == 1
-#elif BACKWARD_HAS_LIBUNWIND == 1
-#elif BACKWARD_HAS_BACKTRACE == 1
-#else
-#undef BACKWARD_HAS_UNWIND
-#define BACKWARD_HAS_UNWIND 1
-#undef BACKWARD_HAS_LIBUNWIND
-#define BACKWARD_HAS_LIBUNWIND 0
-#undef BACKWARD_HAS_BACKTRACE
-#define BACKWARD_HAS_BACKTRACE 0
-#endif
-
-// On linux, backward can extract detailed information about a stack trace
-// using one of the following libraries:
-//
-// #define BACKWARD_HAS_DW 1
-//  - libdw gives you the most juicy details out of your stack traces:
-//    - object filename
-//    - function name
-//    - source filename
-//    - line and column numbers
-//    - source code snippet (assuming the file is accessible)
-//    - variable names (if not optimized out)
-//    - variable values (not supported by backward-cpp)
-//  - You need to link with the lib "dw":
-//    - apt-get install libdw-dev
-//    - g++/clang++ -ldw ...
-//
-// #define BACKWARD_HAS_BFD 1
-//  - With libbfd, you get a fair amount of details:
-//    - object filename
-//    - function name
-//    - source filename
-//    - line numbers
-//    - source code snippet (assuming the file is accessible)
-//  - You need to link with the lib "bfd":
-//    - apt-get install binutils-dev
-//    - g++/clang++ -lbfd ...
-//
-// #define BACKWARD_HAS_DWARF 1
-//  - libdwarf gives you the most juicy details out of your stack traces:
-//    - object filename
-//    - function name
-//    - source filename
-//    - line and column numbers
-//    - source code snippet (assuming the file is accessible)
-//    - variable names (if not optimized out)
-//    - variable values (not supported by backward-cpp)
-//  - You need to link with the lib "dwarf":
-//    - apt-get install libdwarf-dev
-//    - g++/clang++ -ldwarf ...
-//
-// #define BACKWARD_HAS_BACKTRACE_SYMBOL 1
-//  - backtrace provides minimal details for a stack trace:
-//    - object filename
-//    - function name
-//  - backtrace is part of the (e)glib library.
-//
-// The default is:
-// #define BACKWARD_HAS_BACKTRACE_SYMBOL == 1
-//
-// Note that only one of the define should be set to 1 at a time.
-//
-
-#ifndef BACKWARD_HAS_DW
-#define BACKWARD_HAS_DW 0
-#endif
-
-#ifndef BACKWARD_HAS_BFD
-#define BACKWARD_HAS_BFD 0
-#endif
-
-#ifndef BACKWARD_HAS_DWARF
-#define BACKWARD_HAS_DWARF 0
-#endif
-
-#ifndef BACKWARD_HAS_BACKTRACE_SYMBOL
-#define BACKWARD_HAS_BACKTRACE_SYMBOL 0
-#endif
-
-#if BACKWARD_HAS_DW == 1
-#elif BACKWARD_HAS_BFD == 1
-#elif BACKWARD_HAS_DWARF == 1
-#elif BACKWARD_HAS_BACKTRACE_SYMBOL == 1
-#else
-#undef BACKWARD_HAS_DW
-#define BACKWARD_HAS_DW 0
-#undef BACKWARD_HAS_BFD
-#define BACKWARD_HAS_BFD 0
-#undef BACKWARD_HAS_DWARF
-#define BACKWARD_HAS_DWARF 0
-#undef BACKWARD_HAS_BACKTRACE_SYMBOL
-#define BACKWARD_HAS_BACKTRACE_SYMBOL 1
-#endif
+#if defined(BACKWARD_SYSTEM_LINUX)
 
 #include <cxxabi.h>
 #include <fcntl.h>
@@ -258,7 +277,7 @@
 #include <dlfcn.h>
 #endif
 
-#if BACKWARD_HAS_BFD == 1
+#if defined(BACKWARD_SYMBOLIZER_BFD)
 //              NOTE: defining PACKAGE{,_VERSION} is required before including
 //                    bfd.h on some platforms, see also:
 //                    https://sourceware.org/bugzilla/show_bug.cgi?id=14243
@@ -271,13 +290,13 @@
 #include <bfd.h>
 #endif
 
-#if BACKWARD_HAS_DW == 1
+#if defined(BACKWARD_SYMBOLIZER_DW)
 #include <dwarf.h>
 #include <elfutils/libdw.h>
 #include <elfutils/libdwfl.h>
 #endif
 
-#if BACKWARD_HAS_DWARF == 1
+#if defined(BACKWARD_SYMBOLIZER_DWARF)
 #include <algorithm>
 #include <dwarf.h>
 #include <libdwarf.h>
@@ -286,7 +305,8 @@
 #include <map>
 #endif
 
-#if (BACKWARD_HAS_BACKTRACE == 1) || (BACKWARD_HAS_BACKTRACE_SYMBOL == 1)
+#if defined(BACKWARD_WALKER_BACKTRACE) ||                                      \
+    defined(BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL)
 // then we shall rely on backtrace
 #include <execinfo.h>
 #endif
@@ -294,59 +314,6 @@
 #endif // defined(BACKWARD_SYSTEM_LINUX)
 
 #if defined(BACKWARD_SYSTEM_DARWIN)
-// On Darwin, backtrace can back-trace or "walk" the stack using the following
-// libraries:
-//
-// #define BACKWARD_HAS_UNWIND 1
-//  - unwind comes from libgcc, but I saw an equivalent inside clang itself.
-//  - with unwind, the stacktrace is as accurate as it can possibly be, since
-//  this is used by the C++ runtime in gcc/clang for stack unwinding on
-//  exception.
-//  - normally libgcc is already linked to your program by default.
-//
-// #define BACKWARD_HAS_LIBUNWIND 1
-//  - libunwind comes from clang, which implements an API compatible version.
-//  - libunwind provides, in some cases, a more accurate stacktrace as it knows
-//  to decode signal handler frames and lets us edit the context registers when
-//  unwinding, allowing stack traces over bad function references.
-//
-// #define BACKWARD_HAS_BACKTRACE == 1
-//  - backtrace is available by default, though it does not produce as much
-//  information as another library might.
-//
-// The default is:
-// #define BACKWARD_HAS_UNWIND == 1
-//
-// Note that only one of the define should be set to 1 at a time.
-//
-#if BACKWARD_HAS_UNWIND == 1
-#elif BACKWARD_HAS_BACKTRACE == 1
-#elif BACKWARD_HAS_LIBUNWIND == 1
-#else
-#undef BACKWARD_HAS_UNWIND
-#define BACKWARD_HAS_UNWIND 1
-#undef BACKWARD_HAS_BACKTRACE
-#define BACKWARD_HAS_BACKTRACE 0
-#undef BACKWARD_HAS_LIBUNWIND
-#define BACKWARD_HAS_LIBUNWIND 0
-#endif
-
-// On Darwin, backward can extract detailed information about a stack trace
-// using one of the following libraries:
-//
-// #define BACKWARD_HAS_BACKTRACE_SYMBOL 1
-//  - backtrace provides minimal details for a stack trace:
-//    - object filename
-//    - function name
-//
-// The default is:
-// #define BACKWARD_HAS_BACKTRACE_SYMBOL == 1
-//
-#if BACKWARD_HAS_BACKTRACE_SYMBOL == 1
-#else
-#undef BACKWARD_HAS_BACKTRACE_SYMBOL
-#define BACKWARD_HAS_BACKTRACE_SYMBOL 1
-#endif
 
 #include <cxxabi.h>
 #include <fcntl.h>
@@ -355,7 +322,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#if (BACKWARD_HAS_BACKTRACE == 1) || (BACKWARD_HAS_BACKTRACE_SYMBOL == 1)
+#if defined(BACKWARD_WALKER_BACKTRACE) ||                                      \
+    defined(BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL)
 #include <execinfo.h>
 #endif
 #endif // defined(BACKWARD_SYSTEM_DARWIN)
@@ -402,18 +370,9 @@ typedef int ssize_t;
 #include <imagehlp.h>
 #pragma pack(pop, before_imagehlp)
 
-// TODO maybe these should be undefined somewhere else?
-#undef BACKWARD_HAS_UNWIND
-#undef BACKWARD_HAS_BACKTRACE
-#if BACKWARD_HAS_PDB_SYMBOL == 1
-#else
-#undef BACKWARD_HAS_PDB_SYMBOL
-#define BACKWARD_HAS_PDB_SYMBOL 1
-#endif
+#endif // defined(BACKWARD_SYSTEM_WINDOWS)
 
-#endif
-
-#if BACKWARD_HAS_UNWIND == 1
+#if defined(BACKWARD_WALKER_UNWIND)
 
 #include <unwind.h>
 // while gcc's unwind.h defines something like that:
@@ -435,12 +394,12 @@ typedef int ssize_t;
 extern "C" uintptr_t _Unwind_GetIPInfo(_Unwind_Context *, int *);
 #endif
 
-#endif // BACKWARD_HAS_UNWIND == 1
+#endif // BACKWARD_WALKER_UNWIND
 
-#if BACKWARD_HAS_LIBUNWIND == 1
+#if defined(BACKWARD_WALKER_LIBUNWIND)
 #define UNW_LOCAL_ONLY
 #include <libunwind.h>
-#endif // BACKWARD_HAS_LIBUNWIND == 1
+#endif // BACKWARD_WALKER_LIBUNWIND
 
 #ifdef BACKWARD_ATLEAST_CXX11
 #include <unordered_map>
@@ -507,30 +466,40 @@ struct libdw;
 struct libbfd;
 struct libdwarf;
 struct backtrace_symbol;
+struct none;
 
-#if BACKWARD_HAS_DW == 1
+#if defined(BACKWARD_SYMBOLIZER_DW)
 typedef libdw current;
-#elif BACKWARD_HAS_BFD == 1
+#elif defined(BACKWARD_SYMBOLIZER_BFD)
 typedef libbfd current;
-#elif BACKWARD_HAS_DWARF == 1
+#elif defined(BACKWARD_SYMBOLIZER_DWARF)
 typedef libdwarf current;
-#elif BACKWARD_HAS_BACKTRACE_SYMBOL == 1
+#elif defined(BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL)
 typedef backtrace_symbol current;
+#elif defined(BACKWARD_SYMBOLIZER_NONE)
+typedef none current;
 #else
 #error "You shall not pass, until you know what you want."
 #endif
 #elif defined(BACKWARD_SYSTEM_DARWIN)
 struct backtrace_symbol;
+struct none;
 
-#if BACKWARD_HAS_BACKTRACE_SYMBOL == 1
+#if defined(BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL)
 typedef backtrace_symbol current;
+#elif defined(BACKWARD_SYMBOLIZER_NONE)
+typedef none current;
 #else
 #error "You shall not pass, until you know what you want."
 #endif
 #elif defined(BACKWARD_SYSTEM_WINDOWS)
 struct pdb_symbol;
-#if BACKWARD_HAS_PDB_SYMBOL == 1
+struct none;
+
+#if defined(BACKWARD_SYMBOLIZER_PDB)
 typedef pdb_symbol current;
+#elif defined(BACKWARD_SYMBOLIZER_NONE)
+typedef none current;
 #else
 #error "You shall not pass, until you know what you want."
 #endif
@@ -753,7 +722,9 @@ template <typename TAG> class StackTraceImpl {
 public:
   size_t size() const { return 0; }
   Trace operator[](size_t) const { return Trace(); }
-  size_t load_here(size_t = 0) { return 0; }
+  size_t load_here(size_t = 0, void * = nullptr, void * = nullptr) {
+    return 0;
+  }
   size_t load_from(void *, size_t = 0, void * = nullptr, void * = nullptr) {
     return 0;
   }
@@ -761,6 +732,11 @@ public:
   void skip_n_firsts(size_t) {}
   void *const *begin() const { return nullptr; }
   size_t load_saved(void *const *, size_t) { return 0; }
+#if defined(BACKWARD_SYSTEM_WINDOWS)
+  // Accepted by the Windows stack walker; no-ops for BACKWARD_WALKER_NONE.
+  void set_machine_type(DWORD) {}
+  void set_thread_handle(HANDLE) {}
+#endif
 };
 
 class StackTraceImplBase {
@@ -841,7 +817,7 @@ protected:
   std::vector<void *> _stacktrace;
 };
 
-#if BACKWARD_HAS_UNWIND == 1
+#if defined(BACKWARD_WALKER_UNWIND)
 
 namespace details {
 
@@ -946,7 +922,7 @@ private:
   };
 };
 
-#elif BACKWARD_HAS_LIBUNWIND == 1
+#elif defined(BACKWARD_WALKER_LIBUNWIND)
 
 template <>
 class StackTraceImpl<system_tag::current_tag> : public StackTraceImplHolder {
@@ -1116,7 +1092,7 @@ public:
 
     unw_cursor_t cursor;
     if (context()) {
-#if defined(UNW_INIT_SIGNAL_FRAME)
+#if BACKWARD_LIBUNWIND_HAS_SIGNAL_FRAME
       result = unw_init_local2(&cursor, &ctx, UNW_INIT_SIGNAL_FRAME);
 #else
       result = unw_init_local(&cursor, &ctx);
@@ -1163,7 +1139,7 @@ public:
   }
 };
 
-#elif defined(BACKWARD_HAS_BACKTRACE)
+#elif defined(BACKWARD_WALKER_BACKTRACE)
 
 template <>
 class StackTraceImpl<system_tag::current_tag> : public StackTraceImplHolder {
@@ -1201,7 +1177,7 @@ public:
   }
 };
 
-#elif defined(BACKWARD_SYSTEM_WINDOWS)
+#elif defined(BACKWARD_WALKER_DBGHELP)
 
 template <>
 class StackTraceImpl<system_tag::current_tag> : public StackTraceImplHolder {
@@ -1423,7 +1399,15 @@ private:
 
 template <typename STACKTRACE_TAG> class TraceResolverLinuxImpl;
 
-#if BACKWARD_HAS_BACKTRACE_SYMBOL == 1
+#if defined(BACKWARD_SYMBOLIZER_NONE)
+
+template <>
+class TraceResolverLinuxImpl<trace_resolver_tag::none>
+    : public TraceResolverImplBase {};
+
+#endif // BACKWARD_SYMBOLIZER_NONE
+
+#if defined(BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL)
 
 template <>
 class TraceResolverLinuxImpl<trace_resolver_tag::backtrace_symbol>
@@ -1463,9 +1447,9 @@ private:
   details::handle<char **> _symbols;
 };
 
-#endif // BACKWARD_HAS_BACKTRACE_SYMBOL == 1
+#endif // BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL
 
-#if BACKWARD_HAS_BFD == 1
+#if defined(BACKWARD_SYMBOLIZER_BFD)
 
 template <>
 class TraceResolverLinuxImpl<trace_resolver_tag::libbfd>
@@ -1555,7 +1539,7 @@ public:
         find_symbol_details(fobj, trace.addr, symbol_info.dli_fbase);
     details_selected = &details_call_site;
 
-#if BACKWARD_HAS_UNWIND == 0
+#if !defined(BACKWARD_WALKER_UNWIND)
     // ...this is why we also try to resolve the symbol that is right
     // before the return address. If we are lucky enough, we will get the
     // line of the function that was called. But if the code is optimized,
@@ -1580,7 +1564,7 @@ public:
       details_call_site =
           find_symbol_details(fobj, trace.addr, symbol_info.dli_fbase);
     }
-#endif // BACKWARD_HAS_UNWIND
+#endif // BACKWARD_WALKER_UNWIND
 
     if (details_selected->found) {
       if (details_selected->filename) {
@@ -1882,9 +1866,9 @@ private:
     return strcmp(a, b) == 0;
   }
 };
-#endif // BACKWARD_HAS_BFD == 1
+#endif // BACKWARD_SYMBOLIZER_BFD
 
-#if BACKWARD_HAS_DW == 1
+#if defined(BACKWARD_SYMBOLIZER_DW)
 
 template <>
 class TraceResolverLinuxImpl<trace_resolver_tag::libdw>
@@ -2209,9 +2193,9 @@ private:
     return dwarf_filesrc(files, file_idx, nullptr, nullptr);
   }
 };
-#endif // BACKWARD_HAS_DW == 1
+#endif // BACKWARD_SYMBOLIZER_DW
 
-#if BACKWARD_HAS_DWARF == 1
+#if defined(BACKWARD_SYMBOLIZER_DWARF)
 
 template <>
 class TraceResolverLinuxImpl<trace_resolver_tag::libdwarf>
@@ -2361,7 +2345,7 @@ public:
 
 public:
   static int close_dwarf(Dwarf_Debug dwarf) {
-    return dwarf_finish(dwarf, NULL);
+    return dwarf_finish(dwarf);
   }
 
 private:
@@ -2589,8 +2573,8 @@ private:
     Dwarf_Error error = DW_DLE_NE;
     dwarf_handle_t dwarf_handle;
 
-    int dwarf_result = dwarf_elf_init(elf_handle.get(), DW_DLC_READ, NULL, NULL,
-                                      &dwarf_debug, &error);
+    int dwarf_result = dwarf_init_b(file_handle.get(), DW_GROUPNUMBER_ANY, NULL,
+                                    NULL, &dwarf_debug, &error);
 
     // We don't do any special handling for DW_DLV_NO_ENTRY specially.
     // If we get an error, or the file doesn't have debug information
@@ -2692,7 +2676,8 @@ private:
               if (dwarf_attr(current_die, DW_AT_specification, &attr_mem,
                              &error) == DW_DLV_OK) {
                 Dwarf_Off spec_offset = 0;
-                if (dwarf_formref(attr_mem, &spec_offset, &error) ==
+                Dwarf_Bool is_info = 1;
+                if (dwarf_formref(attr_mem, &spec_offset, &is_info, &error) ==
                     DW_DLV_OK) {
                   Dwarf_Off spec_die_offset;
                   if (dwarf_dieoffset(current_die, &spec_die_offset, &error) ==
@@ -2706,7 +2691,7 @@ private:
           }
         }
 
-        int result = dwarf_siblingof(dwarf, current_die, &sibling_die, &error);
+        int result = dwarf_siblingof_c(current_die, &sibling_die, &error);
         if (result == DW_DLV_ERROR) {
           break;
         } else if (result == DW_DLV_NO_ENTRY) {
@@ -2733,14 +2718,15 @@ private:
     if (dwarf_attr(die, attr, &attr_mem, &error) == DW_DLV_OK) {
       Dwarf_Off offset;
       int result = 0;
+      Dwarf_Bool is_info = 1;
       if (global) {
         result = dwarf_global_formref(attr_mem, &offset, &error);
       } else {
-        result = dwarf_formref(attr_mem, &offset, &error);
+        result = dwarf_formref(attr_mem, &offset, &is_info, &error);
       }
 
       if (result == DW_DLV_OK) {
-        if (dwarf_offdie(dwarf, offset, &found_die, &error) != DW_DLV_OK) {
+        if (dwarf_offdie_b(dwarf, offset, 1, &found_die, &error) != DW_DLV_OK) {
           found_die = NULL;
         }
       }
@@ -2785,7 +2771,8 @@ private:
       // that one has the pc we are looking for
       if (it != fobj.current_cu->spec_section.end()) {
         Dwarf_Die spec_die = 0;
-        if (dwarf_offdie(dwarf, it->second, &spec_die, &error) == DW_DLV_OK) {
+        if (dwarf_offdie_b(dwarf, it->second, 1, &spec_die, &error) ==
+            DW_DLV_OK) {
           return spec_die;
         }
       }
@@ -2840,27 +2827,89 @@ private:
 
     Dwarf_Attribute attr;
     if (dwarf_attr(die, DW_AT_ranges, &attr, &error) == DW_DLV_OK) {
+      Dwarf_Half form = 0;
+      dwarf_whatform(attr, &form, &error);
 
-      Dwarf_Off offset;
-      if (dwarf_global_formref(attr, &offset, &error) == DW_DLV_OK) {
-        Dwarf_Ranges *ranges;
-        Dwarf_Signed ranges_count = 0;
-        Dwarf_Unsigned byte_count = 0;
+      Dwarf_Unsigned offset_or_index = 0;
+      if (form == DW_FORM_rnglistx) {
+        // DW_FORM_rnglistx stores an index into .debug_rnglists, not an offset.
+        dwarf_formudata(attr, &offset_or_index, &error);
+      } else {
+        Dwarf_Off offset = 0;
+        dwarf_global_formref(attr, &offset, &error);
+        offset_or_index = offset;
+      }
 
-        if (dwarf_get_ranges_a(dwarf, offset, die, &ranges, &ranges_count,
-                               &byte_count, &error) == DW_DLV_OK) {
-          has_ranges = ranges_count != 0;
-          for (int i = 0; i < ranges_count; i++) {
-            if (ranges[i].dwr_addr1 != 0 &&
-                pc >= ranges[i].dwr_addr1 + low_pc &&
-                pc < ranges[i].dwr_addr2 + low_pc) {
-              result = true;
-              break;
-            }
+      Dwarf_Rnglists_Head rnglists_head = 0;
+      Dwarf_Unsigned rnglists_count = 0;
+      Dwarf_Unsigned rnglists_global_offset = 0;
+
+      // DWARF5 .debug_rnglists
+      if (dwarf_rnglists_get_rle_head(attr, form, offset_or_index,
+                                      &rnglists_head, &rnglists_count,
+                                      &rnglists_global_offset,
+                                      &error) == DW_DLV_OK) {
+        has_ranges = rnglists_count != 0;
+        for (Dwarf_Unsigned i = 0; i < rnglists_count; ++i) {
+          unsigned int entry_length = 0;
+          unsigned int rle_value = 0;
+          Dwarf_Unsigned raw1 = 0;
+          Dwarf_Unsigned raw2 = 0;
+          Dwarf_Bool unavailable = 0;
+          Dwarf_Unsigned cooked1 = 0;
+          Dwarf_Unsigned cooked2 = 0;
+          if (dwarf_get_rnglists_entry_fields_a(
+                  rnglists_head, i, &entry_length, &rle_value, &raw1, &raw2,
+                  &unavailable, &cooked1, &cooked2, &error) != DW_DLV_OK) {
+            continue;
           }
-          dwarf_ranges_dealloc(dwarf, ranges, ranges_count);
+          if (unavailable) {
+            continue;
+          }
+          switch (rle_value) {
+          case DW_RLE_startx_endx:
+          case DW_RLE_startx_length:
+          case DW_RLE_offset_pair:
+          case DW_RLE_start_end:
+          case DW_RLE_start_length:
+            if (pc >= cooked1 && pc < cooked2) {
+              result = true;
+            }
+            break;
+          default:
+            break;
+          }
+          if (result) {
+            break;
+          }
+        }
+        dwarf_dealloc_rnglists_head(rnglists_head);
+      } else {
+        // DWARF4 .debug_ranges
+        Dwarf_Off offset = 0;
+        if (dwarf_global_formref(attr, &offset, &error) == DW_DLV_OK) {
+          Dwarf_Ranges *ranges = 0;
+          Dwarf_Signed ranges_count = 0;
+          Dwarf_Unsigned byte_count = 0;
+          Dwarf_Off real_offset = 0;
+
+          if (dwarf_get_ranges_b(dwarf, offset, die, &real_offset, &ranges,
+                                 &ranges_count, &byte_count,
+                                 &error) == DW_DLV_OK) {
+            has_ranges = ranges_count != 0;
+            for (Dwarf_Signed i = 0; i < ranges_count; ++i) {
+              if (ranges[i].dwr_addr1 != 0 &&
+                  pc >= ranges[i].dwr_addr1 + low_pc &&
+                  pc < ranges[i].dwr_addr2 + low_pc) {
+                result = true;
+                break;
+              }
+            }
+            dwarf_dealloc_ranges(dwarf, ranges, ranges_count);
+          }
         }
       }
+      dwarf_dealloc(dwarf, attr, DW_DLA_ATTR);
     }
 
     // Last attempt. We might have a single address set as low_pc.
@@ -3166,7 +3215,7 @@ private:
           }
         }
 
-        int result = dwarf_siblingof(dwarf, current_die, &sibling_die, &error);
+        int result = dwarf_siblingof_c(current_die, &sibling_die, &error);
         if (result == DW_DLV_ERROR) {
           break;
         } else if (result == DW_DLV_NO_ENTRY) {
@@ -3348,7 +3397,7 @@ private:
         }
       }
 
-      int res = dwarf_siblingof(dwarf, current_die, &sibling_die, &error);
+      int res = dwarf_siblingof_c(current_die, &sibling_die, &error);
       if (res == DW_DLV_ERROR) {
         return NULL;
       } else if (res == DW_DLV_NO_ENTRY) {
@@ -3428,7 +3477,7 @@ private:
         cb(current_die, ns);
       }
 
-      int result = dwarf_siblingof(dwarf, current_die, &sibling_die, &error);
+      int result = dwarf_siblingof_c(current_die, &sibling_die, &error);
       if (result == DW_DLV_ERROR) {
         return false;
       } else if (result == DW_DLV_NO_ENTRY) {
@@ -3543,7 +3592,7 @@ private:
       if (returnDie)
         dwarf_dealloc(dwarf, returnDie, DW_DLA_DIE);
 
-      if (dwarf_siblingof(dwarf, 0, &returnDie, &error) == DW_DLV_OK) {
+      if (dwarf_siblingof_b(dwarf, 0, 1, &returnDie, &error) == DW_DLV_OK) {
         if ((dwarf_tag(returnDie, &tag, &error) == DW_DLV_OK) &&
             tag == DW_TAG_compile_unit) {
           if (die_has_pc(fobj, returnDie, addr)) {
@@ -3570,7 +3619,7 @@ private:
     Dwarf_Die cudie;
     while (dwarf_next_cu_header_d(dwarf, 1, 0, 0, 0, 0, 0, 0, 0, 0,
                                   &next_cu_header, 0, &error) == DW_DLV_OK) {
-      if (dwarf_siblingof(dwarf, 0, &cudie, &error) == DW_DLV_OK) {
+      if (dwarf_siblingof_b(dwarf, 0, 1, &cudie, &error) == DW_DLV_OK) {
         Dwarf_Die die_mem = 0;
         Dwarf_Die resultDie = find_fundie_by_pc(fobj, cudie, addr, die_mem);
 
@@ -3597,7 +3646,7 @@ private:
     return NULL;
   }
 };
-#endif // BACKWARD_HAS_DWARF == 1
+#endif // BACKWARD_SYMBOLIZER_DWARF
 
 template <>
 class TraceResolverImpl<system_tag::linux_tag>
@@ -3608,6 +3657,14 @@ class TraceResolverImpl<system_tag::linux_tag>
 #ifdef BACKWARD_SYSTEM_DARWIN
 
 template <typename STACKTRACE_TAG> class TraceResolverDarwinImpl;
+
+#if defined(BACKWARD_SYMBOLIZER_NONE)
+
+template <>
+class TraceResolverDarwinImpl<trace_resolver_tag::none>
+    : public TraceResolverImplBase {};
+
+#endif // BACKWARD_SYMBOLIZER_NONE
 
 template <>
 class TraceResolverDarwinImpl<trace_resolver_tag::backtrace_symbol>
@@ -3690,6 +3747,8 @@ class TraceResolverImpl<system_tag::darwin_tag>
 #endif // BACKWARD_SYSTEM_DARWIN
 
 #ifdef BACKWARD_SYSTEM_WINDOWS
+
+#if defined(BACKWARD_SYMBOLIZER_PDB)
 
 // Load all symbol info
 // Based on:
@@ -3815,7 +3874,19 @@ private:
   DWORD image_type;
 };
 
-#endif
+#else // !BACKWARD_SYMBOLIZER_PDB
+
+template <> class TraceResolverImpl<system_tag::windows_tag>
+    : public TraceResolverImplBase {
+public:
+  // The Windows stack walker asks for this; 0 means "use the compile-time
+  // machine type", which is the only sensible answer without a PDB resolver.
+  DWORD machine_type() const { return 0; }
+};
+
+#endif // BACKWARD_SYMBOLIZER_PDB
+
+#endif // BACKWARD_SYSTEM_WINDOWS
 
 class TraceResolver : public TraceResolverImpl<system_tag::current_tag> {};
 

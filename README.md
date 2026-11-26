@@ -43,6 +43,15 @@ Note for [folly](https://github.com/facebook/folly) library users: must define `
 
 ## Configuration & Dependencies
 
+Backward has two independent optional dependencies:
+
+* a library to **walk the stack** (`BACKWARD_UNWINDER`), and
+* a library to **resolve symbols and debug information** (`BACKWARD_SYMBOLIZER`).
+
+When Backward is built with CMake, it selects the most capable library that is
+actually usable on the machine, and falls back to the next one otherwise. You
+can also specify the preference yourself, or disable a capability entirely.
+
 ### Integration with CMake
 
 If you are using CMake and want to use its configuration abilities to save you
@@ -72,7 +81,8 @@ If you are using a recent version of CMake, you can integrate `backward` via `Fe
 ```cmake
 include(FetchContent)
 
-# Also requires one of: libbfd (gnu binutils), libdwarf, libdw (elfutils)
+# Backward selects the best unwinder and symbolizer available on the system.
+# See "Choosing the stack walker and symbolizer" below to override the choice.
 FetchContent_Declare(backward
     GIT_REPOSITORY https://github.com/bombela/backward-cpp
     GIT_TAG master  # or a version tag, such as v1.6
@@ -97,18 +107,6 @@ add_subdirectory(/path/to/backward-cpp)
 target_link_libraries(mytarget PUBLIC Backward::Interface)
 ```
 
-#### Modifying `CMAKE_MODULE_PATH`:
-
-In this case you can have Backward installed as a subdirectory:
-
-```
-list(APPEND CMAKE_MODULE_PATH /path/to/backward-cpp)
-find_package(Backward)
-
-# Add Backward to your target (either Backward::Interface or Backward::Backward)
-target_link_libraries(mytarget PUBLIC Backward::Interface)
-```
-
 #### Installation through a regular package manager
 
 In this case you have obtained Backward through a package manager.
@@ -123,22 +121,106 @@ find_package(Backward)
 target_link_libraries(mytarget PUBLIC Backward::Interface)
 ```
 
-### Libraries to unwind the stack
+The backends are selected when the package is built, so an installed package
+always uses the same unwinder and symbolizer as the package you installed.
 
-On Linux and macOS, backtrace can back-trace or "walk" the stack using the
-following libraries:
+### Choosing the stack walker and symbolizer
+
+Both options accept the same syntax:
+
+| Value | Meaning |
+| --- | --- |
+| `AUTO` (default) | Use the platform's recommended order, most capable first. |
+| `NONE` | Disable the capability. Stack traces then contain raw addresses only, or no frames at all for `BACKWARD_UNWINDER`. |
+| a `;`- or `,`-separated list | Try the backends from left to right and use the first usable one. |
+
+The recommended `AUTO` order is:
+
+| Platform | `BACKWARD_UNWINDER` | `BACKWARD_SYMBOLIZER` |
+| --- | --- | --- |
+| Linux | `libunwind`, `unwind`, `backtrace` | `dw`, `bfd`, `dwarf`, `backtrace-symbol` |
+| macOS | `libunwind`, `unwind`, `backtrace` | `backtrace-symbol` |
+| Windows | `dbghelp` | `pdb` |
+
+A backend counts as usable only when its headers and library are found **and**
+`backward.hpp` and `backward.cpp` compile and link against it. This matters for
+libraries whose API changed between versions: an installed but incompatible
+library is skipped instead of breaking the build. If a preference list is
+exhausted, CMake stops with an error that says which candidates were tried and
+why they failed. A misspelled backend name is always an error.
+
+For example, on GNU/Linux:
+
+```sh
+# Default: libunwind and libdw when available, then the next candidates.
+cmake ..
+
+# Prefer libdw, but accept libbfd when libdw is not installed.
+cmake -DBACKWARD_SYMBOLIZER="dw;bfd" ..
+
+# Require libunwind and libbfd; fail the configuration if either is missing.
+cmake -DBACKWARD_UNWINDER=libunwind -DBACKWARD_SYMBOLIZER=bfd ..
+
+# Keep the compiler's unwinder and the minimal backtrace_symbols symbolizer:
+# this needs no third-party library at all.
+cmake -DBACKWARD_UNWINDER=unwind -DBACKWARD_SYMBOLIZER=backtrace-symbol ..
+
+# Do not capture stack traces at all.
+cmake -DBACKWARD_UNWINDER=NONE ..
+```
+
+The selected backends are printed by CMake:
+
+```
+-- Backward: stack unwinder = libunwind
+-- Backward: stack symbolizer = libdw
+```
+
+Options must be set before `add_subdirectory()` or `FetchContent_MakeAvailable()`
+for Backward. Setting a cache variable on the command line, as above, works in
+all integration modes.
+
+### Using `backward.hpp` without CMake
+
+Backward remains a header-only library. Without a build system, define exactly
+one `BACKWARD_WALKER_*` macro and one `BACKWARD_SYMBOLIZER_*` macro before
+including `backward.hpp` (and before compiling `backward.cpp`, if you use it),
+and link the matching library.
+
+Without any definition, backward uses the backends that need no third-party
+link flags:
+
+| Platform | Defaults |
+| --- | --- |
+| Linux / macOS | `BACKWARD_WALKER_UNWIND`, `BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL` |
+| Windows | `BACKWARD_WALKER_DBGHELP`, `BACKWARD_SYMBOLIZER_PDB` |
+
+For example, on GNU/Linux with libunwind and libdw:
+
+```sh
+g++ -g -DBACKWARD_WALKER_LIBUNWIND -DBACKWARD_SYMBOLIZER_DW \
+    -lunwind -ldw ...
+```
+
+Never define a backend that needs an external library without linking that
+library. The CMake targets take care of this automatically.
+
+Defining more than one backend of the same category, or a backend that does not
+exist on the current platform, is a compile-time error.
+
+### Libraries to unwind the stack
 
 #### unwind
 
 Unwind comes from libgcc, but there is an equivalent inside clang itself. With
 unwind, the stacktrace is as accurate as it can possibly be, since this is
-used by the C++ runtine in gcc/clang for stack unwinding on exception.
+used by the C++ runtime in gcc/clang for stack unwinding on exception.
 
 Normally libgcc is already linked to your program by default.
 
 #### libunwind from the [libunwind project](https://github.com/libunwind/libunwind)
 
-	apt-get install binutils-dev (or equivalent)
+	apt-get install libunwind-dev (or equivalent)
 
 Libunwind provides, in some cases, a more accurate stacktrace as it knows
 to decode signal handler frames and lets us edit the context registers when
@@ -147,11 +229,16 @@ unwinding, allowing stack traces over bad function references.
 For best results make sure you are using libunwind 1.3 or later, which added
 `unw_init_local2` and support for handling signal frames.
 
-CMake will warn you when configuring if your libunwind version doesn't support
-signal frames.
+CMake probes for that support and warns when your libunwind version is older.
 
-On macOS clang provides a libunwind API compatible library as part of its
-environment, so no third party libraries are necessary.
+On macOS libunwind is part of the system, so no third party library is
+necessary.
+
+#### backtrace from the C library
+
+`backtrace(3)` is available in glibc, musl and macOS. It is portable, but it
+does not expose the instruction pointer adjustment information that gives
+backward perfectly accurate frames. It is the last fallback on Linux and macOS.
 
 ### Compile with debug info
 
@@ -178,48 +265,40 @@ Backward supports pretty printed stack traces on GNU/Linux, macOS and Windows,
 it will compile fine under other platforms but will not do anything. **Pull
 requests are welcome :)**
 
-Also, by default you will get a really basic stack trace, based on the
-`backtrace_symbols` API:
+Also, without any of the optional symbolizers, you will get a really basic
+stack trace, based on the `backtrace_symbols` API:
 
 ![default trace](doc/nice.png)
 
 You will need to install some dependencies to get the ultimate stack trace.
-Three libraries are currently supported, the only difference is which one is the
-easiest for you to install, so pick your poison:
-
-#### libbfd from the [GNU/binutils](http://www.gnu.org/software/binutils/)
-
-	apt-get install binutils-dev (or equivalent)
-
-And do not forget to link with the lib: `g++/clang++ -lbfd -ldl ...`
-
-This library requires dynamic loading. Which is provided by the library `dl`.
-Hence why we also link with `-ldl`.
-
-Then define the following before every inclusion of `backward.hpp` (don't
-forget to update `backward.cpp` as well):
-
-	#define BACKWARD_HAS_BFD 1
+Three libraries are currently supported on Linux, the only difference is which
+one is the easiest for you to install, so pick your poison:
 
 #### libdw from the [elfutils](https://fedorahosted.org/elfutils/)
 
 	apt-get install libdw-dev (or equivalent)
 
-And do not forget to link with the lib and inform Backward to use it:
+This is the recommended symbolizer: it has the richest output and is usually
+the fastest.
 
-	#define BACKWARD_HAS_DW 1
+#### libbfd from the [GNU/binutils](http://www.gnu.org/software/binutils/)
 
-Of course you can simply add the define (`-DBACKWARD_HAS_...=1`) and the
-linkage details in your build system and even auto-detect which library is
-installed, it's up to you.
+	apt-get install binutils-dev (or equivalent)
+
+This library requires dynamic loading, which is provided by `libdl`.
+
+Note that libbfd is distributed under the GPL, so check that its license is
+acceptable for your project.
 
 #### [libdwarf](https://sourceforge.net/projects/libdwarf/) and [libelf](http://www.mr511.de/software/english.html)
 
 	apt-get install libdwarf-dev (or equivalent)
 
-And do not forget to link with the lib and inform Backward to use it:
-
-	#define BACKWARD_HAS_DWARF 1
+The libdwarf backend uses the modern libdwarf consumer API (the 0.1.x series
+and later, including the 0.11 packages in current distributions) and supports
+DWARF5 `.debug_rnglists`. Older libdwarf releases that only provide the legacy
+API are not supported; CMake will report the backend as unusable and fall back
+to the next symbolizer.
 
 There are several alternative implementations of libdwarf and libelf that
 are API compatible so it's possible, although it hasn't been tested, to
@@ -230,10 +309,11 @@ replace the ones used when developing backward (in bold, below):
 * libelf from [elfutils](https://fedorahosted.org/elfutils/)
 * libelf and libdwarf from FreeBSD's [ELF Tool Chain](https://sourceforge.net/p/elftoolchain/wiki/Home/) project
 
+#### backtrace_symbols from the C library
 
-Of course you can simply add the define (`-DBACKWARD_HAS_...=1`) and the
-linkage details in your build system and even auto-detect which library is
-installed, it's up to you.
+This is the minimal symbolizer: it reports object file names and function
+names, but no source file, line numbers, or source snippets. It needs no
+external library and is the default on macOS and the last fallback on Linux.
 
 That's it, you are all set, you should be getting nice stack traces like the
 one at the beginning of this document.
