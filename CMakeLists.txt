@@ -21,7 +21,7 @@
 # SOFTWARE.
 
 cmake_minimum_required(VERSION 3.14)
-project(backward VERSION 1.6.1 LANGUAGES CXX)
+project(backward VERSION 2.0.0 LANGUAGES CXX)
 
 # Introduce variables:
 # * CMAKE_INSTALL_LIBDIR

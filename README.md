@@ -85,7 +85,7 @@ include(FetchContent)
 # See "Choosing the stack walker and symbolizer" below to override the choice.
 FetchContent_Declare(backward
     GIT_REPOSITORY https://github.com/bombela/backward-cpp
-    GIT_TAG master  # or a version tag, such as v1.6
+    GIT_TAG master  # or a version tag, such as v2.0
     SYSTEM          # optional, the Backward include directory will be treated as system directory
 )
 FetchContent_MakeAvailable(backward)
