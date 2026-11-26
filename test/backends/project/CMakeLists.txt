@@ -12,8 +12,11 @@ endif()
 # visible in the configure output and are carried by Backward::Interface.
 add_subdirectory("${BACKWARD_SOURCE_DIR}" backward)
 
+# Include backward.cpp through the public Backward::Object target so that
+# SignalHandling is compiled and linked with the selected backends as well, not
+# just the header-only part.
 add_executable(backends main.cpp)
-target_link_libraries(backends PRIVATE Backward::Interface)
+target_link_libraries(backends PRIVATE Backward::Object)
 
 # Exercise the header-only path as well: no Backward target, no selection
 # defines, just the header's own platform defaults.

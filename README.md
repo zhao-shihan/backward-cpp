@@ -318,6 +318,22 @@ external library and is the default on macOS and the last fallback on Linux.
 That's it, you are all set, you should be getting nice stack traces like the
 one at the beginning of this document.
 
+## Tests
+
+The test suite includes a backend-selection matrix (`backends`) that configures
+a separate consumer project for each case, and an installed-package test
+(`install`) that runs `find_package(Backward)` against a scratch prefix.
+
+```sh
+cmake -S . -B build -DBACKWARD_TESTS=ON
+cmake --build build
+(cd build && ctest --output-on-failure)
+```
+
+To exercise the full suite with a specific backend, configure with
+`-DBACKWARD_SYMBOLIZER=...` and/or `-DBACKWARD_UNWINDER=...`. The libdwarf case
+is added automatically when a modern libdwarf is usable.
+
 ## API
 
 If you don't want to limit yourself to the defaults offered by `backward.cpp`,

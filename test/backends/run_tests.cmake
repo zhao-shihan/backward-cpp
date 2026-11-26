@@ -43,6 +43,7 @@ if(BACKWARD_PLATFORM STREQUAL "windows")
 	set(_fallback_symbolizer "dw,pdb")
 	set(_fallback_symbolizer_expected pdb)
 	set(_foreign_symbolizer dw)
+	set(_foreign_walker libunwind)
 else()
 	set(_minimal_unwinder unwind)
 	set(_minimal_symbolizer backtrace-symbol)
@@ -53,12 +54,62 @@ else()
 	set(_fallback_symbolizer "pdb,backtrace-symbol")
 	set(_fallback_symbolizer_expected backtrace-symbol)
 	set(_foreign_symbolizer pdb)
+	set(_foreign_walker dbghelp)
 endif()
 
+string(TOUPPER "${_minimal_unwinder}" _minimal_unwinder_upper)
+
 set(_program_ok "frames=[1-9]")
+set(_program_no_frames "frames=0 function_present=0")
+set(_program_no_function "frames=[1-9] function_present=0")
+
+# Checks that the selection written for packaging systems matches the status
+# lines shown to the user.
+function(check_selection_file case_bin output)
+	set(selection_file "${case_bin}/backward_selection.txt")
+	# When Backward is a subproject, CMAKE_CURRENT_BINARY_DIR inside its
+	# CMakeLists is the subdirectory build tree.
+	if(NOT EXISTS "${selection_file}")
+		set(selection_file "${case_bin}/backward/backward_selection.txt")
+	endif()
+	if(NOT EXISTS "${selection_file}")
+		message(FATAL_ERROR "missing backward_selection.txt under ${case_bin}")
+	endif()
+	file(READ "${selection_file}" contents)
+
+	set(expected_unwinder "none")
+	set(expected_symbolizer "none")
+	if(output MATCHES "stack unwinder = ([a-z-]+)")
+		set(expected_unwinder "${CMAKE_MATCH_1}")
+	endif()
+	if(output MATCHES "stack symbolizer = ([a-z-]+)")
+		set(expected_symbolizer "${CMAKE_MATCH_1}")
+	endif()
+
+	if(NOT contents MATCHES "unwinder=([a-z-]+)")
+		message(FATAL_ERROR "selection file has no unwinder entry:\n${contents}")
+	endif()
+	set(file_unwinder "${CMAKE_MATCH_1}")
+	if(NOT contents MATCHES "symbolizer=([a-z-]+)")
+		message(FATAL_ERROR "selection file has no symbolizer entry:\n${contents}")
+	endif()
+	set(file_symbolizer "${CMAKE_MATCH_1}")
+
+	if(NOT file_unwinder STREQUAL expected_unwinder)
+		message(FATAL_ERROR
+			"selection file says unwinder=${file_unwinder}, output says ${expected_unwinder}")
+	endif()
+	if(NOT file_symbolizer STREQUAL expected_symbolizer)
+		message(FATAL_ERROR
+			"selection file says symbolizer=${file_symbolizer}, output says ${expected_symbolizer}")
+	endif()
+	if(NOT contents MATCHES "libraries=")
+		message(FATAL_ERROR "selection file has no libraries entry:\n${contents}")
+	endif()
+endfunction()
 
 function(run_case name)
-	cmake_parse_arguments(CASE "EXPECT_FAIL;NO_MANUAL" "EXPECT;PROGRAM" "" ${ARGN})
+	cmake_parse_arguments(CASE "EXPECT_FAIL;NO_MANUAL" "EXPECT;EXPECT2;PROGRAM" "" ${ARGN})
 	if(NOT CASE_EXPECT)
 		message(FATAL_ERROR "run_case(${name}): EXPECT is required")
 	endif()
@@ -110,6 +161,11 @@ function(run_case name)
 		message(FATAL_ERROR
 			"[${name}] expected '${CASE_EXPECT}' in the configure output.\n${output}")
 	endif()
+	if(CASE_EXPECT2 AND NOT output MATCHES "${CASE_EXPECT2}")
+		message(FATAL_ERROR
+			"[${name}] expected '${CASE_EXPECT2}' in the configure output.\n${output}")
+	endif()
+	check_selection_file("${case_bin}" "${output}")
 
 	set(build_command "${CMAKE_COMMAND}" --build "${case_bin}")
 	if(BACKWARD_MULTI_CONFIG)
@@ -156,12 +212,25 @@ function(run_case name)
 		endif()
 	endif()
 
-	message(STATUS "[PASS] ${name}: ${CASE_EXPECT}")
+	message(STATUS "[PASS] ${name}")
 endfunction()
 
 run_case(auto
 	EXPECT "stack unwinder = (libunwind|unwind|backtrace|dbghelp)"
 	PROGRAM "${_program_ok}")
+
+# Forcing the pair chosen by AUTO verifies that the exported definitions and the
+# explicit selection agree with each other.
+if(DEFINED BACKWARD_SELECTED_UNWINDER AND DEFINED BACKWARD_SELECTED_SYMBOLIZER
+		AND NOT BACKWARD_SELECTED_UNWINDER STREQUAL "none"
+		AND NOT BACKWARD_SELECTED_SYMBOLIZER STREQUAL "none")
+	run_case(explicit_selected
+		EXPECT "stack unwinder = ${BACKWARD_SELECTED_UNWINDER}"
+		EXPECT2 "stack symbolizer = ${BACKWARD_SELECTED_SYMBOLIZER}"
+		PROGRAM "${_program_ok}"
+		-DBACKWARD_UNWINDER=${BACKWARD_SELECTED_UNWINDER}
+		-DBACKWARD_SYMBOLIZER=${BACKWARD_SELECTED_SYMBOLIZER})
+endif()
 
 run_case(minimal
 	EXPECT "stack unwinder = ${_minimal_unwinder}"
@@ -186,12 +255,89 @@ run_case(fallback_symbolizer
 
 run_case(symbolizer_none
 	EXPECT "stack symbolizer = none"
-	PROGRAM "${_program_ok}"
+	PROGRAM "${_program_no_function}"
 	-DBACKWARD_SYMBOLIZER=NONE)
+
+run_case(walker_none
+	EXPECT "stack unwinder = none"
+	PROGRAM "${_program_no_frames}"
+	NO_MANUAL
+	-DBACKWARD_UNWINDER=NONE)
+
+# Backend names are case insensitive and NONE may be spelled in lower case.
+run_case(case_insensitive
+	EXPECT "stack unwinder = ${_minimal_unwinder}"
+	EXPECT2 "stack symbolizer = none"
+	PROGRAM "${_program_no_function}"
+	-DBACKWARD_UNWINDER=${_minimal_unwinder_upper}
+	-DBACKWARD_SYMBOLIZER=none)
+
+# Empty entries and duplicates are skipped instead of rejected.
+run_case(tolerant_list
+	EXPECT "stack unwinder = ${_minimal_unwinder}"
+	PROGRAM "${_program_ok}"
+	-DBACKWARD_UNWINDER=,${_minimal_unwinder},${_minimal_unwinder},)
+
+# Spaces around comma-separated entries are ignored.
+run_case(whitespace_comma
+	EXPECT "stack unwinder = ${_fallback_unwinder_expected}"
+	PROGRAM "${_program_ok}"
+	"-DBACKWARD_UNWINDER= ${_fallback_unwinder} ")
+
+# A backend that is installed but does not compile with backward must be
+# skipped, and the next candidate must take over. The probe cache is preseeded
+# so the test does not depend on libbfd being installed.
+if(NOT BACKWARD_PLATFORM STREQUAL "windows")
+	run_case(probe_failure
+		EXPECT "stack symbolizer = backtrace-symbol"
+		PROGRAM "${_program_ok}"
+		-DBACKWARD_SYMBOLIZER=bfd,backtrace-symbol
+		-DBACKWARD_PROBE_SYMBOLIZER_BFD=0)
+endif()
+
+# Exercise every optional backend that the outer build found usable. The other
+# dimension uses a built-in backend so each case isolates one backend.
+if(DEFINED BACKWARD_TEST_UNWINDERS)
+	string(REPLACE "," ";" _test_unwinders "${BACKWARD_TEST_UNWINDERS}")
+else()
+	set(_test_unwinders "")
+endif()
+foreach(backend IN LISTS _test_unwinders)
+	run_case(walker_${backend}
+		EXPECT "stack unwinder = ${backend}"
+		PROGRAM "${_program_ok}"
+		-DBACKWARD_UNWINDER=${backend}
+		-DBACKWARD_SYMBOLIZER=${_minimal_symbolizer})
+endforeach()
+
+if(DEFINED BACKWARD_TEST_SYMBOLIZERS)
+	string(REPLACE "," ";" _test_symbolizers "${BACKWARD_TEST_SYMBOLIZERS}")
+else()
+	set(_test_symbolizers "")
+endif()
+
+# A modern libdwarf header is expected to work with the current backend. Older
+# libdwarf installations are intentionally unsupported, so only modern ones make
+# the probe mandatory.
+if(BACKWARD_TEST_MODERN_LIBDWARF)
+	list(FIND _test_symbolizers dwarf _dwarf_index)
+	if(_dwarf_index EQUAL -1)
+		message(FATAL_ERROR
+			"modern libdwarf was detected, but the dwarf backend did not probe as usable")
+	endif()
+endif()
+
+foreach(backend IN LISTS _test_symbolizers)
+	run_case(symbolizer_${backend}
+		EXPECT "stack symbolizer = ${backend}"
+		PROGRAM "${_program_ok}"
+		-DBACKWARD_UNWINDER=${_minimal_unwinder}
+		-DBACKWARD_SYMBOLIZER=${backend})
+endforeach()
 
 run_case(none
 	EXPECT "stack walking and symbol resolution are disabled"
-	PROGRAM "frames=0"
+	PROGRAM "${_program_no_frames}"
 	NO_MANUAL
 	-DBACKWARD_UNWINDER=NONE
 	-DBACKWARD_SYMBOLIZER=NONE)
@@ -201,10 +347,20 @@ run_case(invalid_name
 	EXPECT "is not a valid symbolizer backend"
 	-DBACKWARD_SYMBOLIZER=not-a-backend)
 
+run_case(invalid_walker
+	EXPECT_FAIL
+	EXPECT "is not a valid walker backend"
+	-DBACKWARD_UNWINDER=not-a-walker)
+
 run_case(unavailable
 	EXPECT_FAIL
 	EXPECT "none of the requested stack symbolizer backends is usable"
 	-DBACKWARD_SYMBOLIZER=${_foreign_symbolizer})
+
+run_case(unavailable_walker
+	EXPECT_FAIL
+	EXPECT "none of the requested stack walker backends is usable"
+	-DBACKWARD_UNWINDER=${_foreign_walker})
 
 run_case(empty
 	EXPECT_FAIL
@@ -215,5 +371,61 @@ run_case(mixed_with_none
 	EXPECT_FAIL
 	EXPECT "cannot be combined"
 	-DBACKWARD_SYMBOLIZER=none,bfd)
+
+run_case(mixed_with_auto
+	EXPECT_FAIL
+	EXPECT "cannot be combined"
+	-DBACKWARD_UNWINDER=auto,unwind)
+
+# The header rejects invalid combinations even without CMake. This only uses
+# GNU/Clang style flags, so the MSVC and clang-cl builds skip it.
+if(NOT BACKWARD_PLATFORM STREQUAL "windows"
+		AND DEFINED BACKWARD_COMPILER_ID
+		AND BACKWARD_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
+	function(expect_compile_failure name expected)
+		set(command
+			"${BACKWARD_CXX_COMPILER}"
+			-std=c++11
+			"-I${BACKWARD_SOURCE_DIR}"
+			-fsyntax-only
+			${ARGN}
+			"${BACKWARD_SOURCE_DIR}/backward.cpp")
+		execute_process(COMMAND ${command}
+			RESULT_VARIABLE result
+			OUTPUT_VARIABLE output
+			ERROR_VARIABLE error)
+		set(output "${output}\n${error}")
+		if(result EQUAL 0)
+			message(FATAL_ERROR "[${name}] compilation succeeded but should have failed.\n${output}")
+		endif()
+		if(NOT output MATCHES "${expected}")
+			message(FATAL_ERROR "[${name}] expected '${expected}' in the compiler output.\n${output}")
+		endif()
+		message(STATUS "[PASS] ${name}: rejected")
+	endfunction()
+
+	expect_compile_failure(multiple_walkers
+		"select at most one BACKWARD_WALKER"
+		-DBACKWARD_WALKER_UNWIND
+		-DBACKWARD_WALKER_BACKTRACE)
+	expect_compile_failure(multiple_symbolizers
+		"select at most one BACKWARD_SYMBOLIZER"
+		-DBACKWARD_SYMBOLIZER_DW
+		-DBACKWARD_SYMBOLIZER_BFD)
+	if(BACKWARD_PLATFORM STREQUAL "linux")
+		expect_compile_failure(pdb_on_linux
+			"only available on Windows"
+			-DBACKWARD_SYMBOLIZER_PDB)
+		expect_compile_failure(dbghelp_on_linux
+			"only available on Windows"
+			-DBACKWARD_WALKER_DBGHELP)
+	elseif(BACKWARD_PLATFORM STREQUAL "darwin")
+		expect_compile_failure(dw_on_macos
+			"not available on macOS"
+			-DBACKWARD_SYMBOLIZER_DW)
+	endif()
+else()
+	message(STATUS "Skipping header validation tests for '${BACKWARD_COMPILER_ID}' on '${BACKWARD_PLATFORM}'")
+endif()
 
 message(STATUS "All backward backend selection tests passed")

@@ -189,6 +189,46 @@ if(BACKWARD_TESTS)
 		backward_add_test(test/${test}.cpp backward.cpp)
 	endforeach()
 
+	# Probe the optional backends for the runtime matrix. These probes do not
+	# change the build selection; they only decide which regression cases exist.
+	set(BACKWARD_TEST_USABLE_UNWINDERS "")
+	foreach(_backend libunwind)
+		_backward_find_backend(WALKER ${_backend} _found _includes _libraries _reason)
+		if(_found)
+			_backward_backend_id("${_backend}" _id)
+			_backward_probe_backend(WALKER ${_id} "${_includes}" "${_libraries}" _usable)
+			if(_usable)
+				list(APPEND BACKWARD_TEST_USABLE_UNWINDERS ${_backend})
+			endif()
+		endif()
+	endforeach()
+
+	set(BACKWARD_TEST_USABLE_SYMBOLIZERS "")
+	set(BACKWARD_TEST_MODERN_LIBDWARF FALSE)
+	foreach(_backend dw bfd dwarf)
+		_backward_find_backend(SYMBOLIZER ${_backend} _found _includes _libraries _reason)
+		if(_found)
+			if(_backend STREQUAL "dwarf")
+				list(GET _includes 0 _libdwarf_include_dir)
+				if(EXISTS "${_libdwarf_include_dir}/libdwarf.h")
+					file(READ "${_libdwarf_include_dir}/libdwarf.h"
+						_libdwarf_header LIMIT 8192)
+					if(_libdwarf_header MATCHES "DW_LIBDWARF_VERSION_MAJOR")
+						set(BACKWARD_TEST_MODERN_LIBDWARF TRUE)
+					endif()
+				endif()
+			endif()
+			_backward_backend_id("${_backend}" _id)
+			_backward_probe_backend(SYMBOLIZER ${_id} "${_includes}" "${_libraries}" _usable)
+			if(_usable)
+				list(APPEND BACKWARD_TEST_USABLE_SYMBOLIZERS ${_backend})
+			endif()
+		endif()
+	endforeach()
+
+	string(REPLACE ";" "," _backward_test_unwinders "${BACKWARD_TEST_USABLE_UNWINDERS}")
+	string(REPLACE ";" "," _backward_test_symbolizers "${BACKWARD_TEST_USABLE_SYMBOLIZERS}")
+
 	# Dependency selection matrix. Every case configures a fresh consumer
 	# project, so the discovery and compile/link probes run exactly like they do
 	# for a real user, with a different BACKWARD_UNWINDER/BACKWARD_SYMBOLIZER.
@@ -199,14 +239,41 @@ if(BACKWARD_TESTS)
 			"-DBACKWARD_TEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/backends"
 			"-DBACKWARD_GENERATOR=${CMAKE_GENERATOR}"
 			"-DBACKWARD_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+			"-DBACKWARD_COMPILER_ID=${CMAKE_CXX_COMPILER_ID}"
 			"-DBACKWARD_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
 			"-DBACKWARD_BUILD_CONFIG=$<CONFIG>"
 			"-DBACKWARD_MULTI_CONFIG=$<BOOL:${CMAKE_CONFIGURATION_TYPES}>"
 			"-DBACKWARD_EXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
 			"-DBACKWARD_PLATFORM=${_BACKWARD_PLATFORM}"
+			"-DBACKWARD_SELECTED_UNWINDER=${BACKWARD_SELECTED_UNWINDER}"
+			"-DBACKWARD_SELECTED_SYMBOLIZER=${BACKWARD_SELECTED_SYMBOLIZER}"
+			"-DBACKWARD_TEST_UNWINDERS=${_backward_test_unwinders}"
+			"-DBACKWARD_TEST_SYMBOLIZERS=${_backward_test_symbolizers}"
+			"-DBACKWARD_TEST_MODERN_LIBDWARF=${BACKWARD_TEST_MODERN_LIBDWARF}"
 			"-DBACKWARD_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
 			"-DBACKWARD_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
 			-P "${PROJECT_SOURCE_DIR}/test/backends/run_tests.cmake")
+
+	# Installed-package test. It installs this build into a scratch prefix and
+	# builds/runs a separate project that uses find_package(Backward).
+	if(BACKWARD_INSTALL AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+		add_test(NAME install
+			COMMAND ${CMAKE_COMMAND}
+				"-DBACKWARD_BINARY_DIR=${CMAKE_BINARY_DIR}"
+				"-DBACKWARD_TEST_SOURCE_DIR=${PROJECT_SOURCE_DIR}/test/install/project"
+				"-DBACKWARD_TEST_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/install-test"
+				"-DBACKWARD_INSTALL_PREFIX=${CMAKE_CURRENT_BINARY_DIR}/install-prefix"
+				"-DBACKWARD_GENERATOR=${CMAKE_GENERATOR}"
+				"-DBACKWARD_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+				"-DBACKWARD_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
+				"-DBACKWARD_BUILD_CONFIG=$<CONFIG>"
+				"-DBACKWARD_MULTI_CONFIG=$<BOOL:${CMAKE_CONFIGURATION_TYPES}>"
+				"-DBACKWARD_EXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+				"-DBACKWARD_VERSION=${PROJECT_VERSION}"
+				"-DBACKWARD_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
+				"-DBACKWARD_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+				-P "${PROJECT_SOURCE_DIR}/test/install/run_tests.cmake")
+	endif()
 endif()
 
 # The install rules must not depend on whether Backward is the top-level
