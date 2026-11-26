@@ -8,8 +8,8 @@ cmake_minimum_required(VERSION 3.14)
 
 foreach(required
 		BACKWARD_BINARY_DIR BACKWARD_TEST_SOURCE_DIR BACKWARD_TEST_BINARY_DIR
-		BACKWARD_INSTALL_PREFIX BACKWARD_GENERATOR BACKWARD_CXX_COMPILER
-		BACKWARD_EXE_SUFFIX)
+		BACKWARD_INSTALL_PREFIX BACKWARD_INSTALL_LIBDIR BACKWARD_GENERATOR
+		BACKWARD_CXX_COMPILER BACKWARD_EXE_SUFFIX)
 	if(NOT DEFINED ${required})
 		message(FATAL_ERROR "run_tests.cmake: ${required} is required")
 	endif()
@@ -46,13 +46,21 @@ if(NOT install_result EQUAL 0)
 	message(FATAL_ERROR "installation failed.\n${install_output}\n${install_error}")
 endif()
 
+set(backward_config_dir
+	"${BACKWARD_INSTALL_PREFIX}/${BACKWARD_INSTALL_LIBDIR}/cmake/backward")
+if(NOT EXISTS "${backward_config_dir}/BackwardConfig.cmake")
+	message(FATAL_ERROR
+		"the installed package has no BackwardConfig.cmake under ${backward_config_dir}")
+endif()
+
 set(configure_command
 	"${CMAKE_COMMAND}"
 	-S "${BACKWARD_TEST_SOURCE_DIR}"
 	-B "${BACKWARD_TEST_BINARY_DIR}"
 	-G "${BACKWARD_GENERATOR}"
 	"-DCMAKE_CXX_COMPILER=${BACKWARD_CXX_COMPILER}"
-	"-DCMAKE_PREFIX_PATH=${BACKWARD_INSTALL_PREFIX}")
+	"-DCMAKE_PREFIX_PATH=${BACKWARD_INSTALL_PREFIX}"
+	"-DBackward_DIR=${backward_config_dir}")
 if(DEFINED BACKWARD_BUILD_TYPE AND NOT BACKWARD_BUILD_TYPE STREQUAL "")
 	list(APPEND configure_command "-DCMAKE_BUILD_TYPE=${BACKWARD_BUILD_TYPE}")
 endif()
@@ -101,6 +109,12 @@ else()
 endif()
 set(_run_environment "PATH=${BACKWARD_INSTALL_PREFIX}/bin${_path_separator}$ENV{PATH}")
 
+if(BACKWARD_SELECTED_UNWINDER STREQUAL "none")
+	set(_frames_regex "frames=0")
+else()
+	set(_frames_regex "frames=[1-9]")
+endif()
+
 foreach(executable consumer_interface consumer_backward)
 	set(path "${exe_dir}/${executable}${BACKWARD_EXE_SUFFIX}")
 	execute_process(COMMAND "${CMAKE_COMMAND}" -E env "${_run_environment}" "${path}"
@@ -110,8 +124,21 @@ foreach(executable consumer_interface consumer_backward)
 	if(NOT run_result EQUAL 0)
 		message(FATAL_ERROR "${path} failed with ${run_result}.\n${run_output}\n${run_error}")
 	endif()
-	if(NOT run_output MATCHES "frames=[0-9]+")
+	if(NOT run_output MATCHES "${_frames_regex}")
 		message(FATAL_ERROR "${path} produced unexpected output:\n${run_output}")
+	endif()
+	if(NOT run_output MATCHES "walker=([a-z-]+) symbolizer=([a-z-]+)")
+		message(FATAL_ERROR "${path} did not report its selected backends:\n${run_output}")
+	endif()
+	set(_program_walker "${CMAKE_MATCH_1}")
+	set(_program_symbolizer "${CMAKE_MATCH_2}")
+	if(NOT _program_walker STREQUAL BACKWARD_SELECTED_UNWINDER)
+		message(FATAL_ERROR
+			"${path} was built with walker=${_program_walker}, but the package selected ${BACKWARD_SELECTED_UNWINDER}")
+	endif()
+	if(NOT _program_symbolizer STREQUAL BACKWARD_SELECTED_SYMBOLIZER)
+		message(FATAL_ERROR
+			"${path} was built with symbolizer=${_program_symbolizer}, but the package selected ${BACKWARD_SELECTED_SYMBOLIZER}")
 	endif()
 	message(STATUS "[PASS] installed consumer ${executable}")
 endforeach()

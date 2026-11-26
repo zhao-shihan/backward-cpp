@@ -209,13 +209,25 @@ if(BACKWARD_TESTS)
 		_backward_find_backend(SYMBOLIZER ${_backend} _found _includes _libraries _reason)
 		if(_found)
 			if(_backend STREQUAL "dwarf")
-				list(GET _includes 0 _libdwarf_include_dir)
-				if(EXISTS "${_libdwarf_include_dir}/libdwarf.h")
-					file(READ "${_libdwarf_include_dir}/libdwarf.h"
-						_libdwarf_header LIMIT 8192)
-					if(_libdwarf_header MATCHES "DW_LIBDWARF_VERSION_MAJOR")
-						set(BACKWARD_TEST_MODERN_LIBDWARF TRUE)
-					endif()
+				# libdwarf 0.3 already advertises DW_LIBDWARF_VERSION_MAJOR,
+				# but dwarf_siblingof_c only appeared in 0.9. Check for the API
+				# the backend actually needs instead of guessing from a version
+				# macro. The check is a static-library compile, so a missing
+				# symbol is reported as a compile error rather than a link error.
+				include(CMakePushCheckState)
+				include(CheckCXXSourceCompiles)
+				cmake_push_check_state(RESET)
+				set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+				set(CMAKE_REQUIRED_INCLUDES "${_includes}")
+				check_cxx_source_compiles("
+#include <libdwarf.h>
+int main() {
+	(void)&dwarf_siblingof_c;
+	return 0;
+}" BACKWARD_TEST_HAS_DWARF_SIBLINGOF_C)
+				cmake_pop_check_state()
+				if(BACKWARD_TEST_HAS_DWARF_SIBLINGOF_C)
+					set(BACKWARD_TEST_MODERN_LIBDWARF TRUE)
 				endif()
 			endif()
 			_backward_backend_id("${_backend}" _id)
@@ -270,6 +282,9 @@ if(BACKWARD_TESTS)
 				"-DBACKWARD_MULTI_CONFIG=$<BOOL:${CMAKE_CONFIGURATION_TYPES}>"
 				"-DBACKWARD_EXE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
 				"-DBACKWARD_VERSION=${PROJECT_VERSION}"
+				"-DBACKWARD_SELECTED_UNWINDER=${BACKWARD_SELECTED_UNWINDER}"
+				"-DBACKWARD_SELECTED_SYMBOLIZER=${BACKWARD_SELECTED_SYMBOLIZER}"
+				"-DBACKWARD_INSTALL_LIBDIR=${CMAKE_INSTALL_LIBDIR}"
 				"-DBACKWARD_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}"
 				"-DBACKWARD_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
 				-P "${PROJECT_SOURCE_DIR}/test/install/run_tests.cmake")

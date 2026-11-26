@@ -149,8 +149,8 @@
 //     libbfd from GNU binutils. Rich output. Note that libbfd is GPL.
 //   BACKWARD_SYMBOLIZER_DWARF
 //     libdwarf + libelf. Rich output, including DWARF5 .debug_rnglists. This
-//     backend uses the modern libdwarf consumer API (0.1.0 / 2021 and later);
-//     the legacy API of older libdwarf releases is not supported.
+//     backend uses the modern libdwarf consumer API (0.9.0 and later); the
+//     legacy API of older libdwarf releases is not supported.
 //   BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL
 //     backtrace_symbols(3). Minimal output: object and function names.
 //
@@ -3516,16 +3516,29 @@ private:
       }
       dwarf_dealloc(dwarf, attr_mem, DW_DLA_ATTR);
 
-      if (file_index == 0) {
+      // DWARF5 indexes the line table's file names from zero; DWARF4 and
+      // earlier index them from one. Ask the CU instead of assuming a version.
+      Dwarf_Half version = 4;
+      Dwarf_Half offset_size = 0;
+      if (dwarf_get_version_of_die(cu_die, &version, &offset_size) != DW_DLV_OK) {
+        version = 4;
+      }
+
+      if (version < 5 && file_index == 0) {
         return file;
       }
 
       char **srcfiles = 0;
       Dwarf_Signed file_count = 0;
       if (dwarf_srcfiles(cu_die, &srcfiles, &file_count, &error) == DW_DLV_OK) {
-        if (file_count > 0 && file_index <= static_cast<Dwarf_Unsigned>(file_count)) {
+        if (version >= 5) {
+          if (file_index < static_cast<Dwarf_Unsigned>(file_count)) {
+            file = std::string(srcfiles[file_index]);
+          }
+        } else if (file_count > 0 &&
+                   file_index <= static_cast<Dwarf_Unsigned>(file_count)) {
           file = std::string(srcfiles[file_index - 1]);
-	}
+        }
 
         // Deallocate all strings!
         for (int i = 0; i < file_count; ++i) {
@@ -3574,6 +3587,7 @@ private:
         }
         dwarf_dealloc(dwarf, arange, DW_DLA_ARANGE);
       }
+      dwarf_dealloc(dwarf, aranges, DW_DLA_LIST);
     }
 
     if (found)
@@ -3589,9 +3603,6 @@ private:
            dwarf_next_cu_header_d(dwarf, 1, 0, 0, 0, 0, 0, 0, 0, 0,
                                   &next_cu_header, 0, &error) == DW_DLV_OK) {
 
-      if (returnDie)
-        dwarf_dealloc(dwarf, returnDie, DW_DLA_DIE);
-
       if (dwarf_siblingof_b(dwarf, 0, 1, &returnDie, &error) == DW_DLV_OK) {
         if ((dwarf_tag(returnDie, &tag, &error) == DW_DLV_OK) &&
             tag == DW_TAG_compile_unit) {
@@ -3599,6 +3610,13 @@ private:
             found = true;
           }
         }
+      }
+
+      // Do not call dwarf_dealloc() between next_cu_header_d() and
+      // siblingof_b(): libdwarf requires those two calls to be adjacent.
+      if (!found && returnDie) {
+        dwarf_dealloc(dwarf, returnDie, DW_DLA_DIE);
+        returnDie = 0;
       }
     }
 

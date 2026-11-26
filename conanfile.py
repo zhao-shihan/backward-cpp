@@ -37,6 +37,17 @@ def library_names(libraries):
     return names
 
 
+def selection_paths(selection, key):
+    """Returns existing absolute paths from a selection file entry."""
+    paths = []
+    for path in selection.get(key, '').split(';'):
+        path = path.strip()
+        if path and '$<' not in path and os.path.isabs(path) and os.path.isdir(path):
+            if path not in paths:
+                paths.append(path)
+    return paths
+
+
 class BackwardCpp(ConanFile):
     settings = 'os', 'compiler', 'build_type', 'arch'
     name = 'backward'
@@ -102,10 +113,19 @@ class BackwardCpp(ConanFile):
         self.cpp_info.libs = ['backward']
 
         selection = read_selection(self.package_folder)
+        for path in selection_paths(selection, 'include_dirs'):
+            if path not in self.cpp_info.includedirs:
+                self.cpp_info.includedirs.append(path)
+        for path in selection_paths(selection, 'library_dirs'):
+            if path not in self.cpp_info.libdirs:
+                self.cpp_info.libdirs.append(path)
+
         defines = []
         for category, key in (('WALKER', 'unwinder'), ('SYMBOLIZER', 'symbolizer')):
             backend = selection.get(key, '')
-            if backend and backend != 'none':
+            if backend == 'none':
+                defines.append('BACKWARD_%s_NONE' % category)
+            elif backend:
                 defines.append('BACKWARD_%s_%s' %
                                (category, backend.upper().replace('-', '_')))
         if selection.get('libunwind_signal_frame') == '1':

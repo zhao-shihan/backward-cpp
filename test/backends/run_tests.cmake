@@ -25,6 +25,28 @@ if(BACKWARD_TEST_BINARY_DIR STREQUAL "" OR BACKWARD_TEST_BINARY_DIR STREQUAL "/"
 	message(FATAL_ERROR "run_tests.cmake: refusing to use '${BACKWARD_TEST_BINARY_DIR}' as the test build directory")
 endif()
 
+if(DEFINED BACKWARD_TEST_UNWINDERS)
+	string(REPLACE "," ";" _test_unwinders "${BACKWARD_TEST_UNWINDERS}")
+else()
+	set(_test_unwinders "")
+endif()
+if(DEFINED BACKWARD_TEST_SYMBOLIZERS)
+	string(REPLACE "," ";" _test_symbolizers "${BACKWARD_TEST_SYMBOLIZERS}")
+else()
+	set(_test_symbolizers "")
+endif()
+
+# A libdwarf header that declares the modern API is expected to work with the
+# current backend. Fail before running the (slow) matrix, so a broken modern
+# libdwarf cannot be mistaken for an old one.
+if(BACKWARD_TEST_MODERN_LIBDWARF)
+	list(FIND _test_symbolizers dwarf _dwarf_index)
+	if(_dwarf_index EQUAL -1)
+		message(FATAL_ERROR
+			"libdwarf declares dwarf_siblingof_c, but the dwarf backend did not probe as usable")
+	endif()
+endif()
+
 # BACKWARD_MULTI_CONFIG is passed by CTest as 0 or 1 from $<BOOL:...>.
 if(NOT DEFINED BACKWARD_MULTI_CONFIG)
 	set(BACKWARD_MULTI_CONFIG FALSE)
@@ -59,7 +81,15 @@ endif()
 
 string(TOUPPER "${_minimal_unwinder}" _minimal_unwinder_upper)
 
-set(_program_ok "frames=[1-9]")
+# On Linux every real symbolizer can name the current function. Requiring this
+# catches a consumer that was built with backend definitions that do not match
+# the backend CMake selected. The Windows/macOS matrix keeps the weaker check
+# because their symbolizers may depend on debug information that is not present.
+if(BACKWARD_PLATFORM STREQUAL "linux")
+	set(_program_ok "frames=[1-9] function_present=1")
+else()
+	set(_program_ok "frames=[1-9]")
+endif()
 set(_program_no_frames "frames=0 function_present=0")
 set(_program_no_function "frames=[1-9] function_present=0")
 
@@ -105,6 +135,12 @@ function(check_selection_file case_bin output)
 	endif()
 	if(NOT contents MATCHES "libraries=")
 		message(FATAL_ERROR "selection file has no libraries entry:\n${contents}")
+	endif()
+	if(NOT contents MATCHES "include_dirs=")
+		message(FATAL_ERROR "selection file has no include_dirs entry:\n${contents}")
+	endif()
+	if(NOT contents MATCHES "library_dirs=")
+		message(FATAL_ERROR "selection file has no library_dirs entry:\n${contents}")
 	endif()
 endfunction()
 
@@ -199,6 +235,32 @@ function(run_case name)
 			"[${name}] expected program output '${CASE_PROGRAM}', got:\n${run_output}")
 	endif()
 
+	# The consumer prints the macros it was compiled with. They must match the
+	# selection that CMake reported, otherwise the exported definitions are wrong
+	# even though the configure step looked fine.
+	set(expected_walker "none")
+	set(expected_symbolizer "none")
+	if(output MATCHES "stack unwinder = ([a-z-]+)")
+		set(expected_walker "${CMAKE_MATCH_1}")
+	endif()
+	if(output MATCHES "stack symbolizer = ([a-z-]+)")
+		set(expected_symbolizer "${CMAKE_MATCH_1}")
+	endif()
+	if(NOT run_output MATCHES "walker=([a-z-]+) symbolizer=([a-z-]+)")
+		message(FATAL_ERROR
+			"[${name}] the consumer did not report its selected backends:\n${run_output}")
+	endif()
+	set(program_walker "${CMAKE_MATCH_1}")
+	set(program_symbolizer "${CMAKE_MATCH_2}")
+	if(NOT program_walker STREQUAL expected_walker)
+		message(FATAL_ERROR
+			"[${name}] consumer was built with walker=${program_walker}, but CMake selected ${expected_walker}")
+	endif()
+	if(NOT program_symbolizer STREQUAL expected_symbolizer)
+		message(FATAL_ERROR
+			"[${name}] consumer was built with symbolizer=${program_symbolizer}, but CMake selected ${expected_symbolizer}")
+	endif()
+
 	if(NOT CASE_NO_MANUAL)
 		set(manual_exe "${exe_dir}/backends_manual${BACKWARD_EXE_SUFFIX}")
 		execute_process(COMMAND "${manual_exe}"
@@ -278,6 +340,17 @@ run_case(tolerant_list
 	PROGRAM "${_program_ok}"
 	-DBACKWARD_UNWINDER=,${_minimal_unwinder},${_minimal_unwinder},)
 
+# A trailing separator must not turn a single keyword into a mixed list.
+run_case(trailing_none
+	EXPECT "stack symbolizer = none"
+	PROGRAM "${_program_no_function}"
+	-DBACKWARD_SYMBOLIZER=NONE,)
+
+run_case(trailing_auto
+	EXPECT "stack unwinder = (libunwind|unwind|backtrace|dbghelp)"
+	PROGRAM "${_program_ok}"
+	-DBACKWARD_UNWINDER=AUTO,)
+
 # Spaces around comma-separated entries are ignored.
 run_case(whitespace_comma
 	EXPECT "stack unwinder = ${_fallback_unwinder_expected}"
@@ -297,11 +370,6 @@ endif()
 
 # Exercise every optional backend that the outer build found usable. The other
 # dimension uses a built-in backend so each case isolates one backend.
-if(DEFINED BACKWARD_TEST_UNWINDERS)
-	string(REPLACE "," ";" _test_unwinders "${BACKWARD_TEST_UNWINDERS}")
-else()
-	set(_test_unwinders "")
-endif()
 foreach(backend IN LISTS _test_unwinders)
 	run_case(walker_${backend}
 		EXPECT "stack unwinder = ${backend}"
@@ -309,24 +377,6 @@ foreach(backend IN LISTS _test_unwinders)
 		-DBACKWARD_UNWINDER=${backend}
 		-DBACKWARD_SYMBOLIZER=${_minimal_symbolizer})
 endforeach()
-
-if(DEFINED BACKWARD_TEST_SYMBOLIZERS)
-	string(REPLACE "," ";" _test_symbolizers "${BACKWARD_TEST_SYMBOLIZERS}")
-else()
-	set(_test_symbolizers "")
-endif()
-
-# A modern libdwarf header is expected to work with the current backend. Older
-# libdwarf installations are intentionally unsupported, so only modern ones make
-# the probe mandatory.
-if(BACKWARD_TEST_MODERN_LIBDWARF)
-	list(FIND _test_symbolizers dwarf _dwarf_index)
-	if(_dwarf_index EQUAL -1)
-		message(FATAL_ERROR
-			"modern libdwarf was detected, but the dwarf backend did not probe as usable")
-	endif()
-endif()
-
 foreach(backend IN LISTS _test_symbolizers)
 	run_case(symbolizer_${backend}
 		EXPECT "stack symbolizer = ${backend}"

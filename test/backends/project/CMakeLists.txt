@@ -17,11 +17,14 @@ add_subdirectory("${BACKWARD_SOURCE_DIR}" backward)
 # just the header-only part.
 add_executable(backends main.cpp)
 target_link_libraries(backends PRIVATE Backward::Object)
+# backtrace_symbols() only sees symbols exported by the executable.
+set_target_properties(backends PROPERTIES ENABLE_EXPORTS ON)
 
 # Exercise the header-only path as well: no Backward target, no selection
 # defines, just the header's own platform defaults.
 add_executable(backends_manual main.cpp)
 target_include_directories(backends_manual PRIVATE "${BACKWARD_SOURCE_DIR}")
+set_target_properties(backends_manual PROPERTIES ENABLE_EXPORTS ON)
 if(WIN32)
 	target_link_libraries(backends_manual PRIVATE dbghelp psapi)
 endif()

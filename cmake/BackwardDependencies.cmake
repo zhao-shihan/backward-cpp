@@ -232,6 +232,9 @@ function(_backward_probe_backend kind id includes libraries out)
 	include(CMakePushCheckState)
 	include(CheckCXXSourceCompiles)
 	cmake_push_check_state(RESET)
+	# This must be an executable, not a static library: the point of the probe is
+	# to verify that the backend's libraries can be linked, not just compiled.
+	set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)
 	set(CMAKE_REQUIRED_INCLUDES "${includes}" "${_BACKWARD_SOURCE_DIR}")
 	set(CMAKE_REQUIRED_LIBRARIES "${libraries}")
 	# Disable the other capability so that this probe tests exactly one backend,
@@ -302,14 +305,43 @@ endfunction()
 function(_backward_resolve kind valid_names auto_order option_value)
 	string(TOLOWER "${kind}" kind_lower)
 	string(TOUPPER "${kind}" kind_upper)
+	if(kind STREQUAL "WALKER")
+		set(option_name "BACKWARD_UNWINDER")
+	else()
+		set(option_name "BACKWARD_SYMBOLIZER")
+	endif()
 
-	string(STRIP "${option_value}" option_value)
-	string(TOUPPER "${option_value}" value_upper)
-	if(value_upper STREQUAL "NONE")
+	# Split on both commas and semicolons, and ignore empty entries. This makes
+	# "AUTO", "AUTO," and "AUTO;;" equivalent.
+	set(entries "")
+	string(REPLACE "," ";" raw_entries "${option_value}")
+	foreach(entry IN LISTS raw_entries)
+		string(STRIP "${entry}" entry)
+		if(entry STREQUAL "")
+			continue()
+		endif()
+		string(TOLOWER "${entry}" entry)
+		list(APPEND entries "${entry}")
+	endforeach()
+
+	if(entries STREQUAL "")
+		message(FATAL_ERROR
+			"Backward: ${option_name} is empty. Set it to AUTO, NONE, or a list of ${valid_names}.")
+	endif()
+
+	list(LENGTH entries entry_count)
+	list(GET entries 0 first_entry)
+	if(entry_count EQUAL 1)
+		set(value "${first_entry}")
+	else()
+		set(value "")
+	endif()
+
+	if(value STREQUAL "none")
 		set(selected "none")
 		set(includes "")
 		set(libraries "")
-	elseif(value_upper STREQUAL "AUTO")
+	elseif(value STREQUAL "auto")
 		_backward_pick(${kind_upper} "${auto_order}" selected includes libraries failures)
 		if(selected STREQUAL "")
 			if(auto_order STREQUAL "")
@@ -319,34 +351,24 @@ function(_backward_resolve kind valid_names auto_order option_value)
 				message(FATAL_ERROR
 					"Backward: no usable stack ${kind_lower} was found on this system.\n"
 					"Tried:\n  ${failures_text}\n"
-					"Set BACKWARD_${kind_upper} to a preference list, or to NONE to disable it.")
+					"Set ${option_name} to a preference list, or to NONE to disable it.")
 			endif()
 		endif()
 	else()
-		string(REPLACE "," ";" option_value "${option_value}")
 		set(candidates "")
-		foreach(entry IN LISTS option_value)
-			string(STRIP "${entry}" entry)
-			string(TOLOWER "${entry}" entry)
-			if(entry STREQUAL "")
-				continue()
-			endif()
+		foreach(entry IN LISTS entries)
 			if(entry STREQUAL "auto" OR entry STREQUAL "none")
 				message(FATAL_ERROR
-					"Backward: \"${entry}\" cannot be combined with other backends in BACKWARD_${kind_upper}.")
+					"Backward: \"${entry}\" cannot be combined with other backends in ${option_name}.")
 			endif()
 			list(FIND valid_names "${entry}" index)
 			if(index EQUAL -1)
 				message(FATAL_ERROR
-					"Backward: \"${entry}\" is not a valid ${kind_lower} backend for BACKWARD_${kind_upper}.\n"
+					"Backward: \"${entry}\" is not a valid ${kind_lower} backend for ${option_name}.\n"
 					"Valid names are: ${valid_names}")
 			endif()
 			list(APPEND candidates "${entry}")
 		endforeach()
-		if(candidates STREQUAL "")
-			message(FATAL_ERROR
-				"Backward: BACKWARD_${kind_upper} is empty. Set it to AUTO, NONE, or a list of ${valid_names}.")
-		endif()
 		_backward_pick(${kind_upper} "${candidates}" selected includes libraries failures)
 		if(selected STREQUAL "")
 			string(REPLACE ";" "\n  " failures_text "${failures}")
@@ -391,6 +413,7 @@ if(BACKWARD_SELECTED_UNWINDER STREQUAL "libunwind")
 	include(CMakePushCheckState)
 	include(CheckCXXSourceCompiles)
 	cmake_push_check_state(RESET)
+	set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)
 	set(CMAKE_REQUIRED_INCLUDES ${_BACKWARD_WALKER_INCLUDE_DIRS})
 	set(CMAKE_REQUIRED_LIBRARIES ${_BACKWARD_WALKER_LIBRARIES})
 	check_cxx_source_compiles("
@@ -429,6 +452,26 @@ endif()
 list(REMOVE_DUPLICATES BACKWARD_LIBRARIES)
 list(REMOVE_DUPLICATES BACKWARD_INCLUDE_DIRS)
 
+# The packaging selection only needs the backend paths, not the genexes used by
+# the exported CMake targets.
+set(_BACKWARD_SELECTION_INCLUDE_DIRS
+	${_BACKWARD_WALKER_INCLUDE_DIRS} ${_BACKWARD_SYMBOLIZER_INCLUDE_DIRS})
+if(_BACKWARD_SELECTION_INCLUDE_DIRS)
+	list(REMOVE_DUPLICATES _BACKWARD_SELECTION_INCLUDE_DIRS)
+endif()
+set(_BACKWARD_SELECTION_LIBRARY_DIRS "")
+foreach(_backward_library IN LISTS BACKWARD_LIBRARIES)
+	if(IS_ABSOLUTE "${_backward_library}" AND NOT _backward_library MATCHES "\\$<")
+		get_filename_component(_backward_library_dir "${_backward_library}" DIRECTORY)
+		if(_backward_library_dir)
+			list(APPEND _BACKWARD_SELECTION_LIBRARY_DIRS "${_backward_library_dir}")
+		endif()
+	endif()
+endforeach()
+if(_BACKWARD_SELECTION_LIBRARY_DIRS)
+	list(REMOVE_DUPLICATES _BACKWARD_SELECTION_LIBRARY_DIRS)
+endif()
+
 if(NOT DEFINED CMAKE_INSTALL_INCLUDEDIR)
 	set(CMAKE_INSTALL_INCLUDEDIR include)
 endif()
@@ -451,4 +494,6 @@ file(WRITE "${BACKWARD_SELECTION_FILE}"
 	"unwinder=${BACKWARD_SELECTED_UNWINDER}\n"
 	"symbolizer=${BACKWARD_SELECTED_SYMBOLIZER}\n"
 	"libunwind_signal_frame=${BACKWARD_RESOLVED_LIBUNWIND_SIGNAL_FRAME}\n"
-	"libraries=${BACKWARD_LIBRARIES}\n")
+	"libraries=${BACKWARD_LIBRARIES}\n"
+	"include_dirs=${_BACKWARD_SELECTION_INCLUDE_DIRS}\n"
+	"library_dirs=${_BACKWARD_SELECTION_LIBRARY_DIRS}\n")

@@ -176,9 +176,9 @@ The selected backends are printed by CMake:
 -- Backward: stack symbolizer = libdw
 ```
 
-Options must be set before `add_subdirectory()` or `FetchContent_MakeAvailable()`
-for Backward. Setting a cache variable on the command line, as above, works in
-all integration modes.
+The backend options are read when Backward is added. Set them on the command
+line, as above, or in the parent scope before `add_subdirectory()` or
+`FetchContent_MakeAvailable()`.
 
 ### Using `backward.hpp` without CMake
 
@@ -205,8 +205,31 @@ g++ -g -DBACKWARD_WALKER_LIBUNWIND -DBACKWARD_SYMBOLIZER_DW \
 Never define a backend that needs an external library without linking that
 library. The CMake targets take care of this automatically.
 
+When defining `BACKWARD_WALKER_LIBUNWIND` by hand with libunwind 1.3 or later,
+also define `BACKWARD_LIBUNWIND_HAS_SIGNAL_FRAME=1` to enable unwinding from
+signal handler frames. CMake probes for this automatically.
+
 Defining more than one backend of the same category, or a backend that does not
 exist on the current platform, is a compile-time error.
+
+### Migrating from earlier versions
+
+Dependency selection is now a build-system concern, and the old configuration
+interface has been removed. If an existing build sets the old options or macros,
+update it as follows:
+
+| Old | New |
+| --- | --- |
+| `STACK_WALKING_UNWIND`, `STACK_WALKING_LIBUNWIND`, `STACK_WALKING_BACKTRACE` | `BACKWARD_UNWINDER=unwind`, `libunwind`, or `backtrace` |
+| `STACK_DETAILS_AUTO_DETECT` | `BACKWARD_SYMBOLIZER=AUTO` (the default) |
+| `STACK_DETAILS_DW`, `STACK_DETAILS_BFD`, `STACK_DETAILS_DWARF`, `STACK_DETAILS_BACKTRACE_SYMBOL` | `BACKWARD_SYMBOLIZER=dw`, `bfd`, `dwarf`, or `backtrace-symbol` |
+| `BACKWARD_HAS_UNWIND`, `BACKWARD_HAS_LIBUNWIND`, `BACKWARD_HAS_BACKTRACE` | `BACKWARD_WALKER_UNWIND`, `BACKWARD_WALKER_LIBUNWIND`, `BACKWARD_WALKER_BACKTRACE` |
+| `BACKWARD_HAS_DW`, `BACKWARD_HAS_BFD`, `BACKWARD_HAS_DWARF`, `BACKWARD_HAS_BACKTRACE_SYMBOL` | `BACKWARD_SYMBOLIZER_DW`, `BACKWARD_SYMBOLIZER_BFD`, `BACKWARD_SYMBOLIZER_DWARF`, `BACKWARD_SYMBOLIZER_BACKTRACE_SYMBOL` |
+| `BACKWARD_HAS_PDB_SYMBOL` | `BACKWARD_SYMBOLIZER_PDB` |
+| `add_backward(target)` | `target_link_libraries(target PUBLIC Backward::Interface)` (or `Backward::Object` / `Backward::Backward`) |
+
+The new macros are presence macros: define the one you want instead of setting
+`BACKWARD_HAS_*` to `0` or `1`. The CMake targets define them automatically.
 
 ### Libraries to unwind the stack
 
@@ -229,16 +252,18 @@ unwinding, allowing stack traces over bad function references.
 For best results make sure you are using libunwind 1.3 or later, which added
 `unw_init_local2` and support for handling signal frames.
 
-CMake probes for that support and warns when your libunwind version is older.
+CMake probes for that support and reports when your libunwind version is older.
 
 On macOS libunwind is part of the system, so no third party library is
 necessary.
 
 #### backtrace from the C library
 
-`backtrace(3)` is available in glibc, musl and macOS. It is portable, but it
+`backtrace(3)` is available in glibc and macOS. It is portable, but it
 does not expose the instruction pointer adjustment information that gives
 backward perfectly accurate frames. It is the last fallback on Linux and macOS.
+musl does not provide `backtrace(3)`; on musl, select another symbolizer or
+`BACKWARD_SYMBOLIZER=NONE` explicitly.
 
 ### Compile with debug info
 
@@ -294,11 +319,11 @@ acceptable for your project.
 
 	apt-get install libdwarf-dev (or equivalent)
 
-The libdwarf backend uses the modern libdwarf consumer API (the 0.1.x series
-and later, including the 0.11 packages in current distributions) and supports
-DWARF5 `.debug_rnglists`. Older libdwarf releases that only provide the legacy
-API are not supported; CMake will report the backend as unusable and fall back
-to the next symbolizer.
+The libdwarf backend uses the modern libdwarf consumer API (0.9.0 and later,
+including the 0.11 packages in current distributions) and supports DWARF5
+`.debug_rnglists`. Older libdwarf releases that only provide the legacy API are
+not supported; CMake will report the backend as unusable and fall back to the
+next symbolizer.
 
 There are several alternative implementations of libdwarf and libelf that
 are API compatible so it's possible, although it hasn't been tested, to

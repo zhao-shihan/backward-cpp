@@ -5,4 +5,4 @@ include(${CMAKE_BINARY_DIR}/conanbuildinfo.cmake)
 conan_basic_setup(TARGETS)
 
 add_executable(example main.cpp)
-target_link_libraries(example PRIVATE ${CONAN_TARGETS})
+target_link_libraries(example PRIVATE CONAN_PKG::backward)
